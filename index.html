@@ -16,7 +16,7 @@
         // Web Fallback: 基于 IndexedDB 的 API（在无 Electron 环境时使用）
         const createWebApi = () => {
             const DB_NAME = 'grgzt';
-            const DB_VERSION = 1;
+            const DB_VERSION = 3; // bump to ensure clean state for quotes/quote_items
 
             const openDb = () => new Promise((resolve, reject) => {
                 const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -31,6 +31,49 @@
                         const tasks = db.createObjectStore('tasks', { keyPath: 'id', autoIncrement: true });
                         tasks.createIndex('created_at', 'created_at');
                         tasks.createIndex('status', 'status');
+                    }
+                    if (!db.objectStoreNames.contains('leads')) {
+                        const leads = db.createObjectStore('leads', { keyPath: 'id', autoIncrement: true });
+                        leads.createIndex('created_at', 'created_at');
+                        leads.createIndex('status', 'status');
+                    }
+                    if (!db.objectStoreNames.contains('features')) {
+                        const features = db.createObjectStore('features', { keyPath: 'id', autoIncrement: true });
+                        features.createIndex('lead_id', 'lead_id');
+                        features.createIndex('created_at', 'created_at');
+                    }
+                    if (!db.objectStoreNames.contains('projects')) {
+                        const projects = db.createObjectStore('projects', { keyPath: 'id', autoIncrement: true });
+                        projects.createIndex('lead_id', 'lead_id');
+                        projects.createIndex('status', 'status');
+                        projects.createIndex('created_at', 'created_at');
+                    }
+                    if (!db.objectStoreNames.contains('project_tasks')) {
+                        const project_tasks = db.createObjectStore('project_tasks', { keyPath: 'id', autoIncrement: true });
+                        project_tasks.createIndex('project_id', 'project_id');
+                        project_tasks.createIndex('status', 'status');
+                        project_tasks.createIndex('created_at', 'created_at');
+                    }
+                    if (!db.objectStoreNames.contains('timesheets')) {
+                        const timesheets = db.createObjectStore('timesheets', { keyPath: 'id', autoIncrement: true });
+                        timesheets.createIndex('project_id', 'project_id');
+                        timesheets.createIndex('task_id', 'task_id');
+                        timesheets.createIndex('start_time', 'start_time');
+                        timesheets.createIndex('created_at', 'created_at');
+                    }
+                    // 报价相关存储
+                    if (!db.objectStoreNames.contains('quotes')) {
+                        const quotes = db.createObjectStore('quotes', { keyPath: 'id', autoIncrement: true });
+                        quotes.createIndex('lead_id', 'lead_id');
+                        quotes.createIndex('created_at', 'created_at');
+                        quotes.createIndex('updated_at', 'updated_at');
+                        quotes.createIndex('status', 'status');
+                    }
+                    if (!db.objectStoreNames.contains('quote_items')) {
+                        const quoteItems = db.createObjectStore('quote_items', { keyPath: 'id', autoIncrement: true });
+                        quoteItems.createIndex('quote_id', 'quote_id');
+                        quoteItems.createIndex('feature_id', 'feature_id');
+                        quoteItems.createIndex('created_at', 'created_at');
                     }
                 };
                 req.onsuccess = () => resolve(req.result);
@@ -120,6 +163,682 @@
                     } catch (e) {
                         return { success: false, message: e.message };
                     }
+                },
+                getLeads: async () => {
+                    const rows = await txAll('leads', 'readonly', (store) => new Promise((res, rej) => {
+                        const out = [];
+                        const cursorReq = store.openCursor(null, 'prev');
+                        cursorReq.onsuccess = (e) => {
+                            const cursor = e.target.result;
+                            if (cursor) { out.push(cursor.value); cursor.continue(); }
+                            else res(out);
+                        };
+                        cursorReq.onerror = () => rej(cursorReq.error);
+                    }));
+                    return { success: true, data: rows.sort((a,b) => (b.created_at||'').localeCompare(a.created_at||'')) };
+                },
+                addLead: async ({ client_name, project_name = '', budget_min = null, budget_max = null, deadline = '', notes = '', status = 'lead' }) => {
+                    try {
+                        const created_at = new Date().toISOString();
+                        const id = await txAll('leads', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.add({ client_name, project_name, budget_min, budget_max, deadline, notes, status, created_at });
+                            req.onsuccess = () => res(req.result);
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { id } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                updateLead: async (leadId, { client_name, project_name, budget_min, budget_max, deadline, notes, status }) => {
+                    try {
+                        await txAll('leads', 'readwrite', (store) => new Promise((res, rej) => {
+                            const getReq = store.get(leadId);
+                            getReq.onsuccess = () => {
+                                const row = getReq.result;
+                                if (!row) { rej(new Error('Lead not found')); return; }
+                                if (client_name !== undefined) row.client_name = client_name;
+                                if (project_name !== undefined) row.project_name = project_name;
+                                if (budget_min !== undefined) row.budget_min = budget_min;
+                                if (budget_max !== undefined) row.budget_max = budget_max;
+                                if (deadline !== undefined) row.deadline = deadline;
+                                if (notes !== undefined) row.notes = notes;
+                                if (status !== undefined) row.status = status;
+                                const putReq = store.put(row);
+                                putReq.onsuccess = () => res({ changes: 1 });
+                                putReq.onerror = () => rej(putReq.error);
+                            };
+                            getReq.onerror = () => rej(getReq.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                deleteLead: async (leadId) => {
+                    try {
+                        // 在一个事务中删除所有相关数据
+                        const db = await openDb();
+                        await new Promise((resolve, reject) => {
+                            const tx = db.transaction(['quotes', 'quote_items', 'features', 'leads'], 'readwrite');
+
+                            const quoteItemsStore = tx.objectStore('quote_items');
+                            const quotesStore = tx.objectStore('quotes');
+                            const featuresStore = tx.objectStore('features');
+                            const leadsStore = tx.objectStore('leads');
+
+                            // 获取该线索的所有报价并删除
+                            const quoteIds = [];
+                            const quotesCursor = quotesStore.index('lead_id').openCursor(IDBKeyRange.only(leadId));
+
+                            quotesCursor.onsuccess = (e) => {
+                                const cursor = e.target.result;
+                                if (cursor) {
+                                    quoteIds.push(cursor.value.id);
+                                    cursor.delete(); // 删除报价
+                                    cursor.continue();
+                                } else {
+                                    // 删除所有报价项
+                                    let itemsDeleted = 0;
+                                    if (quoteIds.length > 0) {
+                                        quoteIds.forEach(quoteId => {
+                                            const itemsCursor = quoteItemsStore.index('quote_id').openCursor(IDBKeyRange.only(quoteId));
+                                            itemsCursor.onsuccess = (e2) => {
+                                                const cursor2 = e2.target.result;
+                                                if (cursor2) {
+                                                    cursor2.delete();
+                                                    cursor2.continue();
+                                                } else {
+                                                    itemsDeleted++;
+                                                    if (itemsDeleted === quoteIds.length) {
+                                                        deleteFeaturesAndLead();
+                                                    }
+                                                }
+                                            };
+                                        });
+                                    } else {
+                                        deleteFeaturesAndLead();
+                                    }
+                                }
+                            };
+
+                            const deleteFeaturesAndLead = () => {
+                                // 删除功能点
+                                const featuresCursor = featuresStore.index('lead_id').openCursor(IDBKeyRange.only(leadId));
+                                featuresCursor.onsuccess = (e3) => {
+                                    const cursor3 = e3.target.result;
+                                    if (cursor3) {
+                                        cursor3.delete();
+                                        cursor3.continue();
+                                    } else {
+                                        // 最后删除线索
+                                        leadsStore.delete(leadId);
+                                    }
+                                };
+                            };
+
+                            tx.oncomplete = () => resolve();
+                            tx.onerror = () => reject(tx.error);
+                            tx.onabort = () => reject(tx.error || new Error('Transaction aborted'));
+                        });
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                getFeatures: async (leadId) => {
+                    const rows = await txAll('features', 'readonly', (store) => new Promise((res, rej) => {
+                        const out = [];
+                        const index = store.index('lead_id');
+                        const cursorReq = index.openCursor(IDBKeyRange.only(leadId));
+                        cursorReq.onsuccess = (e) => {
+                            const cursor = e.target.result;
+                            if (cursor) { out.push(cursor.value); cursor.continue(); }
+                            else res(out);
+                        };
+                        cursorReq.onerror = () => rej(cursorReq.error);
+                    }));
+                    return { success: true, data: rows.sort((a,b) => (a.created_at||'').localeCompare(b.created_at||'')) };
+                },
+                addFeature: async ({ lead_id, feature_name, hours_est, complexity = 'M', in_scope = 1 }) => {
+                    try {
+                        const created_at = new Date().toISOString();
+                        const id = await txAll('features', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.add({ lead_id, feature_name, hours_est, complexity, in_scope, created_at });
+                            req.onsuccess = () => res(req.result);
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { id } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                updateFeature: async (featureId, { feature_name, hours_est, complexity, in_scope }) => {
+                    try {
+                        await txAll('features', 'readwrite', (store) => new Promise((res, rej) => {
+                            const getReq = store.get(featureId);
+                            getReq.onsuccess = () => {
+                                const row = getReq.result;
+                                if (!row) { rej(new Error('Feature not found')); return; }
+                                if (feature_name !== undefined) row.feature_name = feature_name;
+                                if (hours_est !== undefined) row.hours_est = hours_est;
+                                if (complexity !== undefined) row.complexity = complexity;
+                                if (in_scope !== undefined) row.in_scope = in_scope;
+                                const putReq = store.put(row);
+                                putReq.onsuccess = () => res({ changes: 1 });
+                                putReq.onerror = () => rej(putReq.error);
+                            };
+                            getReq.onerror = () => rej(getReq.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                deleteFeature: async (featureId) => {
+                    try {
+                        await txAll('features', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.delete(featureId);
+                            req.onsuccess = () => res({ changes: 1 });
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                // 项目管理方法
+                getProjects: async () => {
+                    try {
+                        const projects = await txAll('projects', 'readonly', (store) => new Promise((res, rej) => {
+                            const out = [];
+                            const req = store.openCursor();
+                            req.onsuccess = (e) => {
+                                const cursor = e.target.result;
+                                if (cursor) {
+                                    out.push(cursor.value);
+                                    cursor.continue();
+                                } else {
+                                    res(out);
+                                }
+                            };
+                            req.onerror = () => rej(req.error);
+                        }));
+
+                        // 获取关联的线索信息
+                        const projectsWithClientInfo = await Promise.all(projects.map(async (project) => {
+                            if (project.lead_id) {
+                                const leads = await txAll('leads', 'readonly', (store) => new Promise((res, rej) => {
+                                    const req = store.get(project.lead_id);
+                                    req.onsuccess = () => res(req.result);
+                                    req.onerror = () => rej(req.error);
+                                }));
+                                return {
+                                    ...project,
+                                    client_name: leads ? leads.name : null,
+                                    lead_project_name: leads ? leads.project_name : null
+                                };
+                            }
+                            return project;
+                        }));
+
+                        return { success: true, data: projectsWithClientInfo.sort((a,b) => (b.created_at||'').localeCompare(a.created_at||'')) };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                addProject: async (projectData) => {
+                    try {
+                        const created_at = new Date().toISOString();
+                        const id = await txAll('projects', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.add({
+                                ...projectData,
+                                created_at
+                            });
+                            req.onsuccess = () => res(req.result);
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { id, changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                updateProject: async (projectId, projectData) => {
+                    try {
+                        await txAll('projects', 'readwrite', (store) => new Promise((res, rej) => {
+                            const getReq = store.get(projectId);
+                            getReq.onsuccess = () => {
+                                const existing = getReq.result;
+                                if (!existing) {
+                                    rej(new Error('Project not found'));
+                                    return;
+                                }
+                                const updated = { ...existing, ...projectData };
+                                const putReq = store.put(updated);
+                                putReq.onsuccess = () => res({ changes: 1 });
+                                putReq.onerror = () => rej(putReq.error);
+                            };
+                            getReq.onerror = () => rej(getReq.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                deleteProject: async (projectId) => {
+                    try {
+                        // 先删除关联的任务和工时记录
+                        await txAll('project_tasks', 'readwrite', (store) => new Promise((res, rej) => {
+                            const index = store.index('project_id');
+                            const cursorReq = index.openCursor(IDBKeyRange.only(projectId));
+                            const deleted = [];
+                            cursorReq.onsuccess = (e) => {
+                                const cursor = e.target.result;
+                                if (cursor) {
+                                    deleted.push(cursor.delete());
+                                    cursor.continue();
+                                } else {
+                                    Promise.all(deleted).then(() => res()).catch(rej);
+                                }
+                            };
+                            cursorReq.onerror = () => rej(cursorReq.error);
+                        }));
+
+                        await txAll('timesheets', 'readwrite', (store) => new Promise((res, rej) => {
+                            const index = store.index('project_id');
+                            const cursorReq = index.openCursor(IDBKeyRange.only(projectId));
+                            const deleted = [];
+                            cursorReq.onsuccess = (e) => {
+                                const cursor = e.target.result;
+                                if (cursor) {
+                                    deleted.push(cursor.delete());
+                                    cursor.continue();
+                                } else {
+                                    Promise.all(deleted).then(() => res()).catch(rej);
+                                }
+                            };
+                            cursorReq.onerror = () => rej(cursorReq.error);
+                        }));
+
+                        // 再删除项目
+                        await txAll('projects', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.delete(projectId);
+                            req.onsuccess = () => res({ changes: 1 });
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                getProjectTasks: async (projectId) => {
+                    const rows = await txAll('project_tasks', 'readonly', (store) => new Promise((res, rej) => {
+                        const out = [];
+                        const index = store.index('project_id');
+                        const cursorReq = index.openCursor(IDBKeyRange.only(projectId));
+                        cursorReq.onsuccess = (e) => {
+                            const cursor = e.target.result;
+                            if (cursor) { out.push(cursor.value); cursor.continue(); }
+                            else res(out);
+                        };
+                        cursorReq.onerror = () => rej(cursorReq.error);
+                    }));
+                    return { success: true, data: rows.sort((a,b) => (b.created_at||'').localeCompare(a.created_at||'')) };
+                },
+                addProjectTask: async (taskData) => {
+                    try {
+                        const created_at = new Date().toISOString();
+                        const id = await txAll('project_tasks', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.add({
+                                ...taskData,
+                                created_at
+                            });
+                            req.onsuccess = () => res(req.result);
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { id, changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                updateProjectTask: async (taskId, taskData) => {
+                    try {
+                        await txAll('project_tasks', 'readwrite', (store) => new Promise((res, rej) => {
+                            const getReq = store.get(taskId);
+                            getReq.onsuccess = () => {
+                                const existing = getReq.result;
+                                if (!existing) {
+                                    rej(new Error('Task not found'));
+                                    return;
+                                }
+                                const updated = { ...existing, ...taskData };
+                                if (taskData.status === 'done' && existing.status !== 'done') {
+                                    updated.completed_at = new Date().toISOString();
+                                }
+                                const putReq = store.put(updated);
+                                putReq.onsuccess = () => res({ changes: 1 });
+                                putReq.onerror = () => rej(putReq.error);
+                            };
+                            getReq.onerror = () => rej(getReq.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                deleteProjectTask: async (taskId) => {
+                    try {
+                        await txAll('project_tasks', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.delete(taskId);
+                            req.onsuccess = () => res({ changes: 1 });
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                getTimesheets: async (projectId) => {
+                    try {
+                        const timesheets = await txAll('timesheets', 'readonly', (store) => new Promise((res, rej) => {
+                            const out = [];
+                            const index = store.index('project_id');
+                            const cursorReq = index.openCursor(IDBKeyRange.only(projectId));
+                            cursorReq.onsuccess = (e) => {
+                                const cursor = e.target.result;
+                                if (cursor) { out.push(cursor.value); cursor.continue(); }
+                                else res(out);
+                            };
+                            cursorReq.onerror = () => rej(cursorReq.error);
+                        }));
+
+                        // 获取关联的任务信息
+                        const timesheetsWithTaskInfo = await Promise.all(timesheets.map(async (timesheet) => {
+                            if (timesheet.task_id) {
+                                const tasks = await txAll('project_tasks', 'readonly', (store) => new Promise((res, rej) => {
+                                    const req = store.get(timesheet.task_id);
+                                    req.onsuccess = () => res(req.result);
+                                    req.onerror = () => rej(req.error);
+                                }));
+                                return {
+                                    ...timesheet,
+                                    task_title: tasks ? tasks.title : null
+                                };
+                            }
+                            return timesheet;
+                        }));
+
+                        return { success: true, data: timesheetsWithTaskInfo.sort((a,b) => (b.start_time||'').localeCompare(a.start_time||'')) };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                addTimesheet: async (timesheetData) => {
+                    try {
+                        const created_at = new Date().toISOString();
+                        const id = await txAll('timesheets', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.add({
+                                ...timesheetData,
+                                created_at
+                            });
+                            req.onsuccess = () => res(req.result);
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { id, changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                updateTimesheet: async (timesheetId, timesheetData) => {
+                    try {
+                        await txAll('timesheets', 'readwrite', (store) => new Promise((res, rej) => {
+                            const getReq = store.get(timesheetId);
+                            getReq.onsuccess = () => {
+                                const existing = getReq.result;
+                                if (!existing) {
+                                    rej(new Error('Timesheet not found'));
+                                    return;
+                                }
+                                const updated = { ...existing, ...timesheetData };
+                                const putReq = store.put(updated);
+                                putReq.onsuccess = () => res({ changes: 1 });
+                                putReq.onerror = () => rej(putReq.error);
+                            };
+                            getReq.onerror = () => rej(getReq.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                deleteTimesheet: async (timesheetId) => {
+                    try {
+                        await txAll('timesheets', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.delete(timesheetId);
+                            req.onsuccess = () => res({ changes: 1 });
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+
+                // 报价：获取列表（可按 lead 过滤）
+                getQuotes: async (leadId = null) => {
+                    const rows = await txAll('quotes', 'readonly', (store) => new Promise((res, rej) => {
+                        const out = [];
+                        let req;
+                        if (leadId) {
+                            const index = store.index('lead_id');
+                            req = index.openCursor(IDBKeyRange.only(leadId));
+                        } else {
+                            req = store.openCursor();
+                        }
+                        req.onsuccess = (e) => {
+                            const cursor = e.target.result;
+                            if (cursor) { out.push(cursor.value); cursor.continue(); }
+                            else res(out);
+                        };
+                        req.onerror = () => rej(req.error);
+                    }));
+
+                    // 获取所有相关的线索信息
+                    const leadIds = [...new Set(rows.map(quote => quote.lead_id))];
+                    const leads = await txAll('leads', 'readonly', (store) => new Promise((res, rej) => {
+                        const out = [];
+                        const req = store.openCursor();
+                        req.onsuccess = (e) => {
+                            const cursor = e.target.result;
+                            if (cursor) {
+                                if (leadIds.includes(cursor.value.id)) {
+                                    out.push(cursor.value);
+                                }
+                                cursor.continue();
+                            } else {
+                                res(out);
+                            }
+                        };
+                        req.onerror = () => rej(req.error);
+                    }));
+
+                    // 合并报价和线索信息
+                    const enrichedQuotes = rows.map(quote => {
+                        const lead = leads.find(l => l.id === quote.lead_id);
+                        return {
+                            ...quote,
+                            client_name: lead?.client_name || '',
+                            project_name: lead?.project_name || ''
+                        };
+                    });
+
+                    // 按创建时间降序
+                    return { success: true, data: enrichedQuotes.sort((a,b) => (b.created_at||'').localeCompare(a.created_at||'')) };
+                },
+
+                // 报价：获取明细
+                getQuoteItems: async (quoteId) => {
+                    const rows = await txAll('quote_items', 'readonly', (store) => new Promise((res, rej) => {
+                        const out = [];
+                        const index = store.index('quote_id');
+                        const req = index.openCursor(IDBKeyRange.only(quoteId));
+                        req.onsuccess = (e) => {
+                            const cursor = e.target.result;
+                            if (cursor) { out.push(cursor.value); cursor.continue(); }
+                            else res(out);
+                        };
+                        req.onerror = () => rej(req.error);
+                    }));
+                    return { success: true, data: rows.sort((a,b) => (a.created_at||'').localeCompare(b.created_at||'')) };
+                },
+
+                // 报价：创建
+                createQuote: async (quoteData) => {
+                    try {
+                        const now = new Date().toISOString();
+                        const id = await txAll('quotes', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.add({
+                                ...quoteData,
+                                created_at: now,
+                                updated_at: now
+                            });
+                            req.onsuccess = () => res(req.result);
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { id, changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+
+                // 报价明细：创建
+                createQuoteItem: async (itemData) => {
+                    try {
+                        const now = new Date().toISOString();
+                        const id = await txAll('quote_items', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.add({
+                                ...itemData,
+                                created_at: now
+                            });
+                            req.onsuccess = () => res(req.result);
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { id, changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+
+                // 报价：更新
+                updateQuote: async (quoteId, quoteData) => {
+                    try {
+                        await txAll('quotes', 'readwrite', (store) => new Promise((res, rej) => {
+                            const getReq = store.get(quoteId);
+                            getReq.onsuccess = () => {
+                                const existing = getReq.result;
+                                if (!existing) { rej(new Error('Quote not found')); return; }
+                                const updated = { ...existing, ...quoteData, updated_at: new Date().toISOString() };
+                                const putReq = store.put(updated);
+                                putReq.onsuccess = () => res({ changes: 1 });
+                                putReq.onerror = () => rej(putReq.error);
+                            };
+                            getReq.onerror = () => rej(getReq.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+
+                // 报价：删除（先删子项）
+                deleteQuote: async (quoteId) => {
+                    try {
+                        await txAll('quote_items', 'readwrite', (store) => new Promise((res, rej) => {
+                            const index = store.index('quote_id');
+                            const cursorReq = index.openCursor(IDBKeyRange.only(quoteId));
+                            const deleted = [];
+                            cursorReq.onsuccess = (e) => {
+                                const cursor = e.target.result;
+                                if (cursor) { deleted.push(cursor.delete()); cursor.continue(); }
+                                else Promise.all(deleted).then(() => res()).catch(rej);
+                            };
+                            cursorReq.onerror = () => rej(cursorReq.error);
+                        }));
+
+                        await txAll('quotes', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.delete(quoteId);
+                            req.onsuccess = () => res({ changes: 1 });
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+
+                // 报价计算（Web）
+                calculateQuote: async (leadId, basePrice = 0, hourlyRate = 500) => {
+                    try {
+                        const feats = await txAll('features', 'readonly', (store) => new Promise((res, rej) => {
+                            const out = [];
+                            const index = store.index('lead_id');
+                            const req = index.openCursor(IDBKeyRange.only(leadId));
+                            req.onsuccess = (e) => {
+                                const cursor = e.target.result;
+                                if (cursor) { out.push(cursor.value); cursor.continue(); }
+                                else res(out);
+                            };
+                            req.onerror = () => rej(req.error);
+                        }));
+
+                        const complexityFactors = { S: 1.0, M: 1.5, L: 2.2 };
+
+                        let totalHours = 0;
+                        let totalPrice = 0;
+                        const quoteItems = [];
+
+                        feats.forEach(f => {
+                            // 仅统计 in_scope===true/1 的项（无字段时默认统计）
+                            const inScope = (typeof f.in_scope === 'undefined') ? true : !!f.in_scope;
+                            if (!inScope) return;
+
+                            const hours = (parseFloat(f.hours_est) || parseFloat(f.hours) || 0);
+                            const comp = (f.complexity && String(f.complexity).toUpperCase()) || 'M';
+                            const factor = complexityFactors[comp] || 1.5;
+                            const price = hours * hourlyRate * factor;
+
+                            totalHours += hours;
+                            totalPrice += price;
+
+                            quoteItems.push({
+                                feature_id: f.id,
+                                item_name: f.feature_name || f.name || '功能项',
+                                hours: hours,
+                                rate_per_hour: hourlyRate,
+                                complexity: comp,
+                                total_price: Math.round(price)
+                            });
+                        });
+
+                        const finalPrice = (parseFloat(basePrice) || 0) + totalPrice;
+                        const basic = Math.round(finalPrice * 0.8);
+                        const standard = Math.round(finalPrice);
+                        const premium = Math.round(finalPrice * 1.25);
+
+                        return {
+                            success: true,
+                            data: {
+                                base_price: parseFloat(basePrice) || 0,
+                                hourly_rate: parseFloat(hourlyRate) || 500,
+                                total_hours: totalHours,
+                                total_price: standard,
+                                quote_items: quoteItems,
+                                pricing: { basic, standard, premium }
+                            }
+                        };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
                 }
             };
         };
@@ -138,6 +857,45 @@
             const [tasks, setTasks] = React.useState([]);
             const [taskTitle, setTaskTitle] = React.useState('');
             const [taskDesc, setTaskDesc] = React.useState('');
+            // 线索状态
+            const [leads, setLeads] = React.useState([]);
+            const [leadClientName, setLeadClientName] = React.useState('');
+            const [leadProject, setLeadProject] = React.useState('');
+            const [leadBudgetMin, setLeadBudgetMin] = React.useState('');
+            const [leadBudgetMax, setLeadBudgetMax] = React.useState('');
+            const [leadDeadline, setLeadDeadline] = React.useState('');
+            const [leadNotes, setLeadNotes] = React.useState('');
+            // 功能点状态
+            const [selectedLead, setSelectedLead] = React.useState(null);
+            const [features, setFeatures] = React.useState([]);
+            const [featureName, setFeatureName] = React.useState('');
+            const [featureHours, setFeatureHours] = React.useState('');
+            const [featureComplexity, setFeatureComplexity] = React.useState('M');
+            const [featureInScope, setFeatureInScope] = React.useState(true);
+            const [hourlyRate, setHourlyRate] = React.useState('500');
+            const [basePrice, setBasePrice] = React.useState('5000');
+            // 项目管理状态
+            const [projects, setProjects] = React.useState([]);
+            const [selectedProject, setSelectedProject] = React.useState(null);
+            const [projectTasks, setProjectTasks] = React.useState([]);
+            const [taskDescription, setTaskDescription] = React.useState('');
+            // 计时器状态
+            const [timerActive, setTimerActive] = React.useState(false);
+            const [timerStartTime, setTimerStartTime] = React.useState(null);
+            const [timerSeconds, setTimerSeconds] = React.useState(0);
+            const [timerDescription, setTimerDescription] = React.useState('');
+            const [timerInterval, setTimerInterval] = React.useState(null);
+            const [accumulatedSeconds, setAccumulatedSeconds] = React.useState(0);
+            const [currentStart, setCurrentStart] = React.useState(null);
+            // 工时记录状态
+            const [timesheets, setTimesheets] = React.useState([]);
+
+            // 报价相关状态
+            const [quotes, setQuotes] = React.useState([]);
+            const [quoteItems, setQuoteItems] = React.useState([]);
+            const [quoteCalculation, setQuoteCalculation] = React.useState(null);
+            const [quoteTitle, setQuoteTitle] = React.useState('');
+            const [quoteNotes, setQuoteNotes] = React.useState('');
 
             // 初始化数据库
             const initDatabase = async () => {
@@ -146,7 +904,7 @@
                     if (result.success) {
                         setMessage('数据库初始化成功');
                         setDbInitialized(true);
-                        await Promise.all([loadUsers(), loadTasks()]);
+                        await Promise.all([loadUsers(), loadTasks(), loadLeads(), loadProjects(), loadQuotes()]);
                     } else {
                         setMessage('数据库初始化失败: ' + result.message);
                     }
@@ -234,6 +992,625 @@
                 }
             };
 
+            // 加载线索列表
+            const loadLeads = async () => {
+                try {
+                    const result = await api.getLeads();
+                    if (result.success) {
+                        setLeads(result.data);
+                    } else {
+                        setMessage('加载线索失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('加载线索失败: ' + error.message);
+                }
+            };
+
+            // 添加线索
+            const addLead = async () => {
+                if (!leadClientName.trim()) {
+                    setMessage('请输入客户姓名');
+                    return;
+                }
+
+                try {
+                    const result = await api.addLead({
+                        client_name: leadClientName,
+                        project_name: leadProject,
+                        budget_min: leadBudgetMin ? parseInt(leadBudgetMin) : null,
+                        budget_max: leadBudgetMax ? parseInt(leadBudgetMax) : null,
+                        deadline: leadDeadline,
+                        notes: leadNotes,
+                        status: 'contacted'
+                    });
+                    if (result.success) {
+                        setMessage('线索添加成功');
+                        setLeadClientName('');
+                        setLeadProject('');
+                        setLeadBudgetMin('');
+                        setLeadBudgetMax('');
+                        setLeadDeadline('');
+                        setLeadNotes('');
+                        await loadLeads();
+                    } else {
+                        setMessage('添加线索失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('添加线索失败: ' + error.message);
+                }
+            };
+
+            // 删除线索
+            const deleteLead = async (leadId) => {
+                if (!confirm('确定要删除这个线索吗？这将同时删除所有相关的功能点。')) {
+                    return;
+                }
+
+                try {
+                    const result = await api.deleteLead(leadId);
+                    if (result.success) {
+                        setMessage('线索删除成功');
+                        await loadLeads();
+                    } else {
+                        setMessage('删除线索失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('删除线索失败: ' + error.message);
+                }
+            };
+
+            // 选择线索进行报价
+            const selectLeadForQuote = async (lead) => {
+                setSelectedLead(lead);
+                setQuoteTitle(`报价-${lead.client_name}-${new Date().toLocaleDateString()}`);
+                try {
+                    // 加载功能点
+                    const featuresResult = await api.getFeatures(lead.id);
+                    if (featuresResult.success) {
+                        setFeatures(featuresResult.data);
+                    } else {
+                        setMessage('加载功能点失败: ' + featuresResult.message);
+                    }
+
+                    // 使用新的API计算报价
+                    const calculationResult = await api.calculateQuote(
+                        lead.id,
+                        parseFloat(basePrice) || 5000,
+                        parseFloat(hourlyRate) || 500
+                    );
+                    if (calculationResult.success) {
+                        setQuoteCalculation(calculationResult.data);
+                    } else {
+                        setMessage('报价计算失败: ' + calculationResult.message);
+                    }
+                } catch (error) {
+                    setMessage('加载报价数据失败: ' + error.message);
+                }
+            };
+
+            // 关闭报价面板
+            const closeQuotePanel = () => {
+                setSelectedLead(null);
+                setFeatures([]);
+                setFeatureName('');
+                setFeatureHours('');
+                setFeatureComplexity('M');
+                setFeatureInScope(true);
+                setQuoteCalculation(null);
+                setQuoteTitle('');
+                setQuoteNotes('');
+            };
+
+            // 保存报价
+            const saveQuote = async () => {
+                if (!selectedLead || !quoteCalculation) {
+                    setMessage('请先选择线索并计算报价');
+                    return;
+                }
+
+                try {
+                    // 创建报价
+                    const quoteData = {
+                        lead_id: selectedLead.id,
+                        title: quoteTitle,
+                        base_price: quoteCalculation.base_price,
+                        hourly_rate: quoteCalculation.hourly_rate,
+                        total_hours: quoteCalculation.total_hours,
+                        total_price: quoteCalculation.total_price,
+                        status: 'draft',
+                        notes: quoteNotes
+                    };
+
+                    const quoteResult = await api.createQuote(quoteData);
+                    if (!quoteResult.success) {
+                        setMessage('创建报价失败: ' + quoteResult.message);
+                        return;
+                    }
+
+                    const quoteId = quoteResult.data.id;
+
+                    // 创建报价明细
+                    for (const item of quoteCalculation.quote_items) {
+                        const itemData = {
+                            quote_id: quoteId,
+                            feature_id: item.feature_id,
+                            item_name: item.item_name,
+                            item_description: '',
+                            hours: item.hours,
+                            rate_per_hour: item.rate_per_hour,
+                            total_price: item.total_price,
+                            complexity: item.complexity
+                        };
+
+                        await api.createQuoteItem(itemData);
+                    }
+
+                    setMessage('报价保存成功！');
+                    closeQuotePanel();
+
+                    // 重新加载报价列表
+                    const quotesResult = await api.getQuotes();
+                    if (quotesResult.success) {
+                        setQuotes(quotesResult.data);
+                    }
+                } catch (error) {
+                    setMessage('保存报价失败: ' + error.message);
+                }
+            };
+
+            // 重新计算报价
+            const recalculateQuote = async () => {
+                if (!selectedLead) return;
+
+                try {
+                    const calculationResult = await api.calculateQuote(
+                        selectedLead.id,
+                        parseFloat(basePrice) || 5000,
+                        parseFloat(hourlyRate) || 500
+                    );
+                    if (calculationResult.success) {
+                        setQuoteCalculation(calculationResult.data);
+                    } else {
+                        setMessage('报价计算失败: ' + calculationResult.message);
+                    }
+                } catch (error) {
+                    setMessage('重新计算报价失败: ' + error.message);
+                }
+            };
+
+            // 删除报价
+            const deleteQuote = async (quoteId) => {
+                if (!confirm('确定要删除这个报价吗？此操作不可撤销。')) {
+                    return;
+                }
+
+                try {
+                    const result = await api.deleteQuote(quoteId);
+                    if (result.success) {
+                        setMessage('报价删除成功');
+                        // 重新加载报价列表
+                        const quotesResult = await api.getQuotes();
+                        if (quotesResult.success) {
+                            setQuotes(quotesResult.data);
+                        }
+                    } else {
+                        setMessage('删除报价失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('删除报价失败: ' + error.message);
+                }
+            };
+
+            // ==================== 项目管理函数 ====================
+
+            // 加载项目列表
+            const loadProjects = async () => {
+                try {
+                    const result = await api.getProjects();
+                    if (result.success) {
+                        setProjects(result.data);
+                    } else {
+                        setMessage('加载项目失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('加载项目失败: ' + error.message);
+                }
+            };
+
+            // 加载报价列表
+            const loadQuotes = async () => {
+                try {
+                    const result = await api.getQuotes();
+                    if (result.success) {
+                        setQuotes(result.data);
+                    } else {
+                        setMessage('加载报价失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('加载报价失败: ' + error.message);
+                }
+            };
+
+            // 转换线索为项目
+            const convertLeadToProject = async (lead) => {
+                try {
+                    const result = await api.addProject({
+                        lead_id: lead.id,
+                        name: lead.project_name || `${lead.client_name}的项目`,
+                        status: 'active',
+                        base_price: 5000,
+                        hourly_rate: 500
+                    });
+                    if (result.success) {
+                        setMessage('项目创建成功');
+                        await loadProjects();
+                    } else {
+                        setMessage('创建项目失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('创建项目失败: ' + error.message);
+                }
+            };
+
+            // 选择项目
+            const selectProject = async (project) => {
+                setSelectedProject(project);
+                try {
+                    const [tasksResult, timesheetsResult] = await Promise.all([
+                        api.getProjectTasks(project.id),
+                        api.getTimesheets(project.id)
+                    ]);
+
+                    if (tasksResult.success) {
+                        setProjectTasks(tasksResult.data);
+                    } else {
+                        setMessage('加载任务失败: ' + tasksResult.message);
+                    }
+
+                    if (timesheetsResult.success) {
+                        setTimesheets(timesheetsResult.data);
+                    } else {
+                        setMessage('加载工时记录失败: ' + timesheetsResult.message);
+                    }
+                } catch (error) {
+                    setMessage('加载项目数据失败: ' + error.message);
+                }
+            };
+
+            // 关闭项目面板
+            const closeProjectPanel = () => {
+                setSelectedProject(null);
+                setProjectTasks([]);
+                setTaskTitle('');
+                setTaskDescription('');
+                setTimesheets([]);
+
+                // 强制重置计时器状态
+                if (timerInterval) {
+                    clearInterval(timerInterval);
+                    setTimerInterval(null);
+                }
+                setTimerActive(false);
+                setTimerStartTime(null);
+                setAccumulatedSeconds(0);
+                setCurrentStart(null);
+                setTimerSeconds(0);
+                setTimerDescription('');
+            };
+
+            // 删除项目
+            const deleteProject = async (projectId) => {
+                if (!confirm('确定要删除该项目及其关联的任务与工时记录吗？此操作不可撤销。')) {
+                    return;
+                }
+                try {
+                    const result = await api.deleteProject(projectId);
+                    if (result.success) {
+                        setMessage('项目删除成功');
+                        // 若当前打开的项目被删除，关闭面板
+                        if (selectedProject && selectedProject.id === projectId) {
+                            closeProjectPanel();
+                        }
+                        await loadProjects();
+                    } else {
+                        setMessage('删除项目失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('删除项目失败: ' + error.message);
+                }
+            };
+
+            // 添加项目任务
+            const addProjectTask = async () => {
+                if (!taskTitle.trim() || !selectedProject) {
+                    setMessage('请输入任务标题');
+                    return;
+                }
+
+                try {
+                    const result = await api.addProjectTask({
+                        project_id: selectedProject.id,
+                        title: taskTitle,
+                        description: taskDescription,
+                        status: 'todo'
+                    });
+                    if (result.success) {
+                        setMessage('任务添加成功');
+                        setTaskTitle('');
+                        setTaskDescription('');
+                        const newTasks = await api.getProjectTasks(selectedProject.id);
+                        if (newTasks.success) {
+                            setProjectTasks(newTasks.data);
+                        }
+                    } else {
+                        setMessage('添加任务失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('添加任务失败: ' + error.message);
+                }
+            };
+
+            // 更新任务状态
+            const updateTaskStatus = async (taskId, newStatus) => {
+                try {
+                    const result = await api.updateProjectTask(taskId, { status: newStatus });
+                    if (result.success) {
+                        setMessage('任务状态更新成功');
+                        const newTasks = await api.getProjectTasks(selectedProject.id);
+                        if (newTasks.success) {
+                            setProjectTasks(newTasks.data);
+                        }
+                    } else {
+                        setMessage('更新任务状态失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('更新任务状态失败: ' + error.message);
+                }
+            };
+
+            const toggleProjectTaskStatus = async (taskId) => {
+                try {
+                    const task = projectTasks.find(t => t.id === taskId);
+                    if (!task) return;
+
+                    const newStatus = task.status === 'done' ? 'todo' : 'done';
+                    await updateTaskStatus(taskId, newStatus);
+                } catch (error) {
+                    setMessage('切换任务状态失败: ' + error.message);
+                }
+            };
+
+            // 删除项目任务
+            const deleteProjectTask = async (taskId) => {
+                try {
+                    const result = await api.deleteProjectTask(taskId);
+                    if (result.success) {
+                        setMessage('任务删除成功');
+                        const newTasks = await api.getProjectTasks(selectedProject.id);
+                        if (newTasks.success) {
+                            setProjectTasks(newTasks.data);
+                        }
+                    } else {
+                        setMessage('删除任务失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('删除任务失败: ' + error.message);
+                }
+            };
+
+            // ==================== 计时器函数 ====================
+
+            // 开始计时
+            const startTimer = () => {
+                if (!selectedProject || !timerDescription.trim()) {
+                    setMessage('请选择项目并输入工作描述');
+                    return;
+                }
+
+                const startAt = Date.now();
+                const base = accumulatedSeconds;
+                setCurrentStart(new Date(startAt));
+                setTimerActive(true);
+
+                // 如果是全新开始，设置开始时间
+                if (accumulatedSeconds === 0) {
+                    setTimerStartTime(new Date(startAt));
+                }
+
+                const interval = setInterval(() => {
+                    const elapsed = Math.floor((Date.now() - startAt) / 1000);
+                    setTimerSeconds(base + elapsed);
+                }, 1000);
+
+                setTimerInterval(interval);
+                setMessage('计时器已启动');
+            };
+
+            // 暂停计时
+            const pauseTimer = () => {
+                if (timerInterval) {
+                    clearInterval(timerInterval);
+                    setTimerInterval(null);
+                }
+
+                // 计算累积时间
+                const currentElapsed = currentStart ? Math.floor((new Date() - currentStart) / 1000) : 0;
+                setAccumulatedSeconds(prev => prev + currentElapsed);
+                setCurrentStart(null);
+                setTimerActive(false);
+                setMessage('计时器已暂停');
+            };
+
+            // 停止计时并保存记录
+            const stopTimer = async () => {
+                if (!selectedProject) return;
+
+                // 基于当前时刻计算最终秒数，避免依赖异步状态更新
+                const nowMs = Date.now();
+                const runningElapsed = (timerActive && currentStart)
+                    ? Math.floor((nowMs - currentStart.getTime()) / 1000)
+                    : 0;
+                const finalSeconds = accumulatedSeconds + runningElapsed;
+
+                // 停止 interval 并重置运行态标记
+                if (timerInterval) {
+                    clearInterval(timerInterval);
+                    setTimerInterval(null);
+                }
+                setTimerActive(false);
+                setCurrentStart(null);
+
+                if (finalSeconds === 0) {
+                    setMessage('没有可保存的工时记录');
+                    return;
+                }
+
+                try {
+                    const durationMinutes = Math.floor(finalSeconds / 60);
+                    const endIso = new Date(nowMs).toISOString();
+                    const startIso = timerStartTime ? timerStartTime.toISOString() : endIso;
+
+                    const result = await api.addTimesheet({
+                        project_id: selectedProject.id,
+                        task_id: null,
+                        description: timerDescription,
+                        start_time: startIso,
+                        end_time: endIso,
+                        duration_minutes: durationMinutes
+                    });
+
+                    if (result.success) {
+                        setMessage(`工时记录已保存：${Math.floor(durationMinutes / 60)}小时${durationMinutes % 60}分钟`);
+
+                        // 重置计时器
+                        setTimerStartTime(null);
+                        setAccumulatedSeconds(0);
+                        setTimerSeconds(0);
+                        setTimerDescription('');
+
+                        // 重新加载工时记录
+                        const newTimesheets = await api.getTimesheets(selectedProject.id);
+                        if (newTimesheets.success) {
+                            setTimesheets(newTimesheets.data);
+                        }
+                    } else {
+                        setMessage('保存工时记录失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('保存工时记录失败: ' + error.message);
+                }
+            };
+
+            // 格式化时间显示
+            const formatTime = (seconds) => {
+                const hours = Math.floor(seconds / 3600);
+                const minutes = Math.floor((seconds % 3600) / 60);
+                const secs = seconds % 60;
+                return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+            };
+
+            // 计算总工时
+            const calculateTotalHours = () => {
+                return timesheets.reduce((total, timesheet) => {
+                    return total + (timesheet.duration_minutes || 0);
+                }, 0);
+            };
+
+            // 添加功能点
+            const addFeature = async () => {
+                if (!featureName.trim() || !featureHours.trim()) {
+                    setMessage('请输入功能点名称和工时');
+                    return;
+                }
+
+                try {
+                    const result = await api.addFeature({
+                        lead_id: selectedLead.id,
+                        feature_name: featureName,
+                        hours_est: parseInt(featureHours),
+                        complexity: featureComplexity,
+                        in_scope: featureInScope
+                    });
+                    if (result.success) {
+                        setMessage('功能点添加成功');
+                        setFeatureName('');
+                        setFeatureHours('');
+                        setFeatureComplexity('M');
+                        setFeatureInScope(true);
+                        const newFeatures = await api.getFeatures(selectedLead.id);
+                        if (newFeatures.success) {
+                            setFeatures(newFeatures.data);
+                        }
+                        // 重新计算报价
+                        await recalculateQuote();
+                    } else {
+                        setMessage('添加功能点失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('添加功能点失败: ' + error.message);
+                }
+            };
+
+            // 删除功能点
+            const deleteFeature = async (featureId) => {
+                try {
+                    const result = await api.deleteFeature(featureId);
+                    if (result.success) {
+                        setMessage('功能点删除成功');
+                        const newFeatures = await api.getFeatures(selectedLead.id);
+                        if (newFeatures.success) {
+                            setFeatures(newFeatures.data);
+                        }
+                        // 重新计算报价
+                        await recalculateQuote();
+                    } else {
+                        setMessage('删除功能点失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('删除功能点失败: ' + error.message);
+                }
+            };
+
+            // 计算三档报价
+            const calculateQuotes = () => {
+                const rate = parseFloat(hourlyRate) || 500;
+                const base = parseFloat(basePrice) || 5000;
+
+                const featureTotal = features.reduce((sum, feature) => {
+                    const hours = parseInt(feature.hours_est) || 0;
+
+                    // 根据复杂度文本转换为系数
+                    let complexityFactor = 1.0;
+                    switch (feature.complexity) {
+                        case 'S':
+                            complexityFactor = 0.8;
+                            break;
+                        case 'M':
+                            complexityFactor = 1.0;
+                            break;
+                        case 'L':
+                            complexityFactor = 1.5;
+                            break;
+                        default:
+                            complexityFactor = 1.0;
+                    }
+
+                    // 只计算在范围内的功能点
+                    if (feature.in_scope) {
+                        return sum + (hours * rate * complexityFactor);
+                    }
+                    return sum;
+                }, 0);
+
+                const standardTotal = base + featureTotal;
+
+                return {
+                    basic: Math.round(standardTotal * 0.8),
+                    standard: Math.round(standardTotal),
+                    premium: Math.round(standardTotal * 1.25)
+                };
+            };
+
             // 页面加载时初始化
             React.useEffect(() => {
                 initDatabase();
@@ -313,6 +1690,671 @@
                                             </span>
                                         </div>
                                     ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* 线索管理面板 */}
+                        <div className="bg-white rounded-lg shadow-md p-6 mt-6">
+                            <h2 className="text-xl font-semibold mb-4">线索管理</h2>
+                            <div className="space-y-4 mb-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                                        客户姓名 *
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={leadClientName}
+                                        onChange={(e) => setLeadClientName(e.target.value)}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        placeholder="请输入客户姓名"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                                        项目名称
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={leadProject}
+                                        onChange={(e) => setLeadProject(e.target.value)}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        placeholder="请输入项目名称"
+                                    />
+                                </div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                                            预算范围（元）
+                                        </label>
+                                        <div className="flex space-x-2">
+                                            <input
+                                                type="number"
+                                                value={leadBudgetMin}
+                                                onChange={(e) => setLeadBudgetMin(e.target.value)}
+                                                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                placeholder="最小值"
+                                            />
+                                            <span className="self-center">-</span>
+                                            <input
+                                                type="number"
+                                                value={leadBudgetMax}
+                                                onChange={(e) => setLeadBudgetMax(e.target.value)}
+                                                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                placeholder="最大值"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                                            期限
+                                        </label>
+                                        <input
+                                            type="date"
+                                            value={leadDeadline}
+                                            onChange={(e) => setLeadDeadline(e.target.value)}
+                                            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                                        备注
+                                    </label>
+                                    <textarea
+                                        value={leadNotes}
+                                        onChange={(e) => setLeadNotes(e.target.value)}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        placeholder="项目备注信息"
+                                        rows="3"
+                                    />
+                                </div>
+                                <button
+                                    onClick={addLead}
+                                    disabled={!dbInitialized}
+                                    className={`w-full py-2 px-4 rounded-md text-white font-medium ${dbInitialized ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'}`}
+                                >
+                                    添加线索
+                                </button>
+                            </div>
+
+                            {leads.length === 0 ? (
+                                <p className="text-gray-500">暂无线索</p>
+                            ) : (
+                                <div className="space-y-2">
+                                    {leads.map((lead) => (
+                                        <div key={lead.id} className="p-3 bg-gray-50 rounded-md">
+                                            <div className="flex items-center justify-between">
+                                                <div>
+                                                    <span className="font-medium">{lead.client_name || lead.name}</span>
+                                                    {lead.project_name && (
+                                                        <span className="text-gray-600 ml-2">项目: {lead.project_name}</span>
+                                                    )}
+                                                    {(lead.budget_min > 0 || lead.budget_max > 0) && (
+                                                        <span className="text-green-600 ml-2">
+                                                            预算: ¥{lead.budget_min || 0} - ¥{lead.budget_max || 0}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <div className="flex space-x-2">
+                                                    <button
+                                                        onClick={() => selectLeadForQuote(lead)}
+                                                        className="px-2 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+                                                    >
+                                                        生成报价
+                                                    </button>
+                                                    {lead.status === 'contacted' && (
+                                                        <button
+                                                            onClick={() => convertLeadToProject(lead)}
+                                                            className="px-2 py-1 text-sm bg-green-600 text-white rounded hover:bg-green-700"
+                                                        >
+                                                            转为项目
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        onClick={() => deleteLead(lead.id)}
+                                                        className="px-2 py-1 text-sm bg-red-600 text-white rounded hover:bg-red-700"
+                                                    >
+                                                        删除
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div className="text-sm text-gray-500 mt-1">
+                                                {lead.deadline && <span>期限: {lead.deadline}</span>}
+                                                <span className="ml-4">状态: {lead.status}</span>
+                                            </div>
+                                            <div className="text-xs text-gray-400 mt-1">
+                                                {lead.created_at ? (new Date(lead.created_at).toString() === 'Invalid Date' ? lead.created_at : new Date(lead.created_at).toLocaleString()) : ''}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* 报价管理面板 */}
+                        {selectedLead && (
+                            <div className="bg-white rounded-lg shadow-md p-6 mt-6">
+                                <div className="flex items-center justify-between mb-4">
+                                    <h2 className="text-xl font-semibold">报价管理 - {selectedLead.client_name}</h2>
+                                    <button
+                                        onClick={closeQuotePanel}
+                                        className="px-3 py-1 text-sm bg-gray-600 text-white rounded hover:bg-gray-700"
+                                    >
+                                        关闭
+                                    </button>
+                                </div>
+
+                                {/* 报价参数设置 */}
+                                <div className="grid grid-cols-2 gap-4 mb-6 p-4 bg-gray-50 rounded-md">
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                                            基础价格（元）
+                                        </label>
+                                        <input
+                                            type="number"
+                                            value={basePrice}
+                                            onChange={(e) => setBasePrice(e.target.value)}
+                                            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            placeholder="5000"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                                            时薪（元/小时）
+                                        </label>
+                                        <input
+                                            type="number"
+                                            value={hourlyRate}
+                                            onChange={(e) => setHourlyRate(e.target.value)}
+                                            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            placeholder="500"
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* 功能点管理 */}
+                                <div className="mb-6">
+                                    <h3 className="text-lg font-medium mb-3">功能点管理</h3>
+                                    <div className="grid grid-cols-2 gap-4 mb-4">
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                                功能点名称
+                                            </label>
+                                            <input
+                                                type="text"
+                                                value={featureName}
+                                                onChange={(e) => setFeatureName(e.target.value)}
+                                                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                placeholder="功能点名称"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                                工时（小时）
+                                            </label>
+                                            <input
+                                                type="number"
+                                                value={featureHours}
+                                                onChange={(e) => setFeatureHours(e.target.value)}
+                                                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                placeholder="8"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4 mb-4">
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                                复杂度
+                                            </label>
+                                            <select
+                                                value={featureComplexity}
+                                                onChange={(e) => setFeatureComplexity(e.target.value)}
+                                                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            >
+                                                <option value="S">简单 (S)</option>
+                                                <option value="M">中等 (M)</option>
+                                                <option value="L">复杂 (L)</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                                是否在范围内
+                                            </label>
+                                            <div className="flex items-center space-x-4 mt-2">
+                                                <label className="flex items-center">
+                                                    <input
+                                                        type="radio"
+                                                        name="inScope"
+                                                        checked={featureInScope}
+                                                        onChange={() => setFeatureInScope(true)}
+                                                        className="mr-2"
+                                                    />
+                                                    <span>在范围内</span>
+                                                </label>
+                                                <label className="flex items-center">
+                                                    <input
+                                                        type="radio"
+                                                        name="inScope"
+                                                        checked={!featureInScope}
+                                                        onChange={() => setFeatureInScope(false)}
+                                                        className="mr-2"
+                                                    />
+                                                    <span>超出范围</span>
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button
+                                        onClick={addFeature}
+                                        className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                                    >
+                                        添加功能点
+                                    </button>
+                                </div>
+
+                                {/* 功能点列表 */}
+                                {features.length > 0 && (
+                                    <div className="mb-6">
+                                        <h3 className="text-lg font-medium mb-3">功能点列表</h3>
+                                        <div className="space-y-2">
+                                            {features.map((feature) => (
+                                                <div key={feature.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+                                                    <div>
+                                                        <span className="font-medium">{feature.feature_name || feature.name}</span>
+                                                        <span className="text-gray-600 ml-2">{feature.hours_est || feature.hours}小时</span>
+                                                        <span className={`ml-2 ${feature.complexity === 'S' ? 'text-green-600' : feature.complexity === 'M' ? 'text-blue-600' : 'text-red-600'}`}>
+                                                            复杂度: {feature.complexity}
+                                                        </span>
+                                                        {!feature.in_scope && (
+                                                            <span className="text-orange-600 ml-2">超出范围</span>
+                                                        )}
+                                                    </div>
+                                                    <button
+                                                        onClick={() => deleteFeature(feature.id)}
+                                                        className="px-2 py-1 text-sm bg-red-600 text-white rounded hover:bg-red-700"
+                                                    >
+                                                        删除
+                                                    </button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* 三档报价预览 */}
+                                {quoteCalculation && (
+                                    <div>
+                                        <h3 className="text-lg font-medium mb-3">三档报价</h3>
+                                        <div className="grid grid-cols-3 gap-4">
+                                            <div className="p-4 border border-green-200 rounded-md bg-green-50">
+                                                <h4 className="font-medium text-green-800 mb-2">基础档</h4>
+                                                <p className="text-2xl font-bold text-green-600">¥{quoteCalculation.pricing.basic.toLocaleString()}</p>
+                                                <p className="text-sm text-green-600 mt-1">适合预算有限的项目</p>
+                                            </div>
+                                            <div className="p-4 border border-blue-200 rounded-md bg-blue-50">
+                                                <h4 className="font-medium text-blue-800 mb-2">标准档</h4>
+                                                <p className="text-2xl font-bold text-blue-600">¥{quoteCalculation.pricing.standard.toLocaleString()}</p>
+                                                <p className="text-sm text-blue-600 mt-1">推荐选择，性价比最高</p>
+                                            </div>
+                                            <div className="p-4 border border-purple-200 rounded-md bg-purple-50">
+                                                <h4 className="font-medium text-purple-800 mb-2">进阶档</h4>
+                                                <p className="text-2xl font-bold text-purple-600">¥{quoteCalculation.pricing.premium.toLocaleString()}</p>
+                                                <p className="text-sm text-purple-600 mt-1">包含更多高级功能</p>
+                                            </div>
+                                        </div>
+
+                                        {/* 报价详情和操作 */}
+                                        <div className="mt-6 space-y-4">
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div>
+                                                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                                                        报价标题
+                                                    </label>
+                                                    <input
+                                                        type="text"
+                                                        value={quoteTitle}
+                                                        onChange={(e) => setQuoteTitle(e.target.value)}
+                                                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                        placeholder="报价标题"
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                                                        备注
+                                                    </label>
+                                                    <input
+                                                        type="text"
+                                                        value={quoteNotes}
+                                                        onChange={(e) => setQuoteNotes(e.target.value)}
+                                                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                        placeholder="报价备注"
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            <div className="flex space-x-4">
+                                                <button
+                                                    onClick={recalculateQuote}
+                                                    className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+                                                >
+                                                    重新计算
+                                                </button>
+                                                <button
+                                                    onClick={saveQuote}
+                                                    className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
+                                                >
+                                                    保存报价
+                                                </button>
+                                                <button
+                                                    onClick={closeQuotePanel}
+                                                    className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700"
+                                                >
+                                                    关闭
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* 报价管理面板 */}
+                        <div className="bg-white rounded-lg shadow-md p-6 mt-6">
+                            <h2 className="text-xl font-semibold mb-4">报价管理</h2>
+
+                            {/* 报价列表 */}
+                            {quotes.length === 0 ? (
+                                <p className="text-gray-500">暂无报价记录</p>
+                            ) : (
+                                <div className="space-y-3">
+                                    {quotes.map((quote) => (
+                                        <div key={quote.id} className="p-4 border border-gray-200 rounded-md">
+                                            <div className="flex items-center justify-between">
+                                                <div>
+                                                    <h3 className="font-medium">{quote.title}</h3>
+                                                    <p className="text-sm text-gray-600">
+                                                        客户: {quote.client_name} | 项目: {quote.project_name}
+                                                    </p>
+                                                    <p className="text-lg font-bold text-blue-600">
+                                                        总价: ¥{quote.total_price?.toLocaleString() || 0}
+                                                    </p>
+                                                    <p className="text-sm text-gray-500">
+                                                        工时: {quote.total_hours || 0}小时 | 状态: {quote.status}
+                                                    </p>
+                                                </div>
+                                                <div className="flex space-x-2">
+                                                    <button
+                                                        onClick={() => {
+                                                            // 查看报价详情
+                                                            api.getQuoteItems(quote.id).then(result => {
+                                                                if (result.success) {
+                                                                    setQuoteItems(result.data);
+                                                                    setSelectedLead({ id: quote.lead_id, client_name: quote.client_name, project_name: quote.project_name });
+                                                                    setMessage(`已加载报价 "${quote.title}" 的详细信息`);
+                                                                }
+                                                            });
+                                                        }}
+                                                        className="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+                                                    >
+                                                        查看详情
+                                                    </button>
+                                                    <button
+                                                        onClick={() => deleteQuote(quote.id)}
+                                                        className="px-3 py-1 text-sm bg-red-600 text-white rounded hover:bg-red-700"
+                                                    >
+                                                        删除
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* 项目管理面板 */}
+                        <div className="bg-white rounded-lg shadow-md p-6 mt-6">
+                            <h2 className="text-xl font-semibold mb-4">项目管理</h2>
+
+                            {/* 转换线索为项目 */}
+                            <div className="mb-6 p-4 bg-blue-50 rounded-md">
+                                <h3 className="text-lg font-medium mb-3">转换线索为项目</h3>
+                                <div className="space-y-4">
+                                    <select
+                                        value={leadProject}
+                                        onChange={(e) => setLeadProject(e.target.value)}
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    >
+                                        <option value="">选择要转换的线索</option>
+                                        {leads.filter(lead => lead.status === 'contacted').map((lead) => (
+                                            <option key={lead.id} value={lead.id}>
+                                                {lead.client_name || lead.name} {(lead.budget_min > 0 || lead.budget_max > 0) ? `(预算: ¥${lead.budget_min || 0} - ¥${lead.budget_max || 0})` : ''}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <button
+                                        onClick={() => {
+                                            const lead = leads.find(l => l.id == leadProject);
+                                            if (lead) convertLeadToProject(lead);
+                                        }}
+                                        disabled={!leadProject}
+                                        className={`px-4 py-2 rounded-md text-white font-medium ${leadProject ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'}`}
+                                    >
+                                        转换为项目
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* 项目列表 */}
+                            <div className="mb-6">
+                                <h3 className="text-lg font-medium mb-3">项目列表</h3>
+                                {projects.length === 0 ? (
+                                    <p className="text-gray-500">暂无项目，请从线索转换</p>
+                                ) : (
+                                    <div className="space-y-2">
+                                        {projects.map((project) => (
+                                            <div key={project.id} className="p-3 bg-gray-50 rounded-md">
+                                                <div className="flex items-center justify-between">
+                                                    <div>
+                                                        <span className="font-medium">{project.name}</span>
+                                                        {project.lead_id && (
+                                                            <span className="text-gray-600 ml-2">
+                                                                (来自: {leads.find(l => l.id === project.lead_id)?.client_name || leads.find(l => l.id === project.lead_id)?.name || '未知线索'})
+                                                            </span>
+                                                        )}
+                                                        {project.base_price > 0 && (
+                                                            <span className="text-green-600 ml-2">基础价: ¥{project.base_price}</span>
+                                                        )}
+                                                        {project.hourly_rate > 0 && (
+                                                            <span className="text-blue-600 ml-2">时薪: ¥{project.hourly_rate}</span>
+                                                        )}
+                                                    </div>
+                                                    <div className="flex space-x-2">
+                                                        <button
+                                                            onClick={() => selectProject(project)}
+                                                            className="px-2 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+                                                        >
+                                                            管理任务
+                                                        </button>
+                                                        <button
+                                                            onClick={() => deleteProject(project.id)}
+                                                            className="px-2 py-1 text-sm bg-red-600 text-white rounded hover:bg-red-700"
+                                                        >
+                                                            删除
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                <div className="text-sm text-gray-500 mt-1">
+                                                    <span>状态: {project.status}</span>
+                                                    <span className="ml-4">
+                                                        创建: {project.created_at ? (new Date(project.created_at).toString() === 'Invalid Date' ? project.created_at : new Date(project.created_at).toLocaleDateString()) : ''}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* 项目详情面板 */}
+                            {selectedProject && (
+                                <div className="border-t pt-6">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <h3 className="text-lg font-medium">项目详情 - {selectedProject.name}</h3>
+                                        <button
+                                            onClick={closeProjectPanel}
+                                            className="px-3 py-1 text-sm bg-gray-600 text-white rounded hover:bg-gray-700"
+                                        >
+                                            关闭
+                                        </button>
+                                    </div>
+
+                                    {/* 计时器 */}
+                                    <div className="mb-6 p-4 bg-yellow-50 rounded-md">
+                                        <h4 className="font-medium mb-3">工时计时器</h4>
+                                        <div className="space-y-4">
+                                            <input
+                                                type="text"
+                                                value={timerDescription}
+                                                onChange={(e) => setTimerDescription(e.target.value)}
+                                                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                placeholder="工作内容描述"
+                                            />
+                                            <div className="flex items-center space-x-4">
+                                                <div className="text-2xl font-mono">
+                                                    {Math.floor(timerSeconds / 3600).toString().padStart(2, '0')}:
+                                                    {Math.floor((timerSeconds % 3600) / 60).toString().padStart(2, '0')}:
+                                                    {(timerSeconds % 60).toString().padStart(2, '0')}
+                                                </div>
+                                                <div className="flex space-x-2">
+                                                    {!timerActive ? (
+                                                        <button
+                                                            onClick={startTimer}
+                                                            disabled={!timerDescription.trim()}
+                                                            className={`px-4 py-2 rounded-md text-white font-medium ${timerDescription.trim() ? (accumulatedSeconds > 0 ? 'bg-blue-600 hover:bg-blue-700' : 'bg-green-600 hover:bg-green-700') : 'bg-gray-400 cursor-not-allowed'}`}
+                                                        >
+                                                            {accumulatedSeconds > 0 ? '继续' : '开始'}
+                                                        </button>
+                                                    ) : (
+                                                        <button
+                                                            onClick={pauseTimer}
+                                                            className="px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700"
+                                                        >
+                                                            暂停
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        onClick={stopTimer}
+                                                        disabled={accumulatedSeconds === 0}
+                                                        className={`px-4 py-2 rounded-md text-white font-medium ${accumulatedSeconds > 0 ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-400 cursor-not-allowed'}`}
+                                                    >
+                                                        停止并记录
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* 项目任务管理 */}
+                                    <div className="mb-6">
+                                        <h4 className="font-medium mb-3">项目任务</h4>
+                                        <div className="space-y-4 mb-4">
+                                            <input
+                                                type="text"
+                                                value={taskTitle}
+                                                onChange={(e) => setTaskTitle(e.target.value)}
+                                                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                placeholder="任务标题"
+                                            />
+                                            <textarea
+                                                value={taskDesc}
+                                                onChange={(e) => setTaskDesc(e.target.value)}
+                                                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                placeholder="任务描述"
+                                            />
+                                            <button
+                                                onClick={addProjectTask}
+                                                disabled={!taskTitle.trim()}
+                                                className={`px-4 py-2 rounded-md text-white font-medium ${taskTitle.trim() ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'}`}
+                                            >
+                                                添加项目任务
+                                            </button>
+                                        </div>
+
+                                        {projectTasks.length === 0 ? (
+                                            <p className="text-gray-500">暂无任务</p>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                {projectTasks.map((task) => (
+                                                    <div key={task.id} className="p-3 bg-gray-50 rounded-md">
+                                                        <div className="flex items-center justify-between">
+                                                            <div>
+                                                                <span className="font-medium">{task.title}</span>
+                                                                {task.description && (
+                                                                    <span className="text-gray-500 ml-2">{task.description}</span>
+                                                                )}
+                                                            </div>
+                                                            <div className="flex items-center space-x-2">
+                                                                <span className="text-sm text-gray-500">状态: {task.status}</span>
+                                                                <button
+                                                                    className="px-2 py-1 text-sm bg-green-600 text-white rounded"
+                                                                    onClick={() => toggleProjectTaskStatus(task.id)}
+                                                                >
+                                                                    {task.status === 'done' ? '设为待办' : '设为完成'}
+                                                                </button>
+                                                                <button
+                                                                    className="px-2 py-1 text-sm bg-red-600 text-white rounded"
+                                                                    onClick={() => deleteProjectTask(task.id)}
+                                                                >
+                                                                    删除
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                        <div className="text-xs text-gray-400 mt-1">
+                                                            {task.created_at ? (new Date(task.created_at).toString() === 'Invalid Date' ? task.created_at : new Date(task.created_at).toLocaleString()) : ''}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* 工时记录 */}
+                                    <div>
+                                        <h4 className="font-medium mb-3">工时记录</h4>
+                                        {timesheets.length === 0 ? (
+                                            <p className="text-gray-500">暂无工时记录</p>
+                                        ) : (
+                                            <div className="space-y-2">
+                                                {timesheets.map((timesheet) => (
+                                                    <div key={timesheet.id} className="p-3 bg-gray-50 rounded-md">
+                                                        <div className="flex items-center justify-between">
+                                                            <div>
+                                                                <span className="font-medium">{timesheet.description}</span>
+                                                                <span className="text-green-600 ml-2">
+                                                                    {Math.floor(timesheet.duration_minutes / 60)}小时{timesheet.duration_minutes % 60}分钟
+                                                                </span>
+                                                            </div>
+                                                            <div className="text-sm text-gray-500">
+                                                                {timesheet.start_time ? (new Date(timesheet.start_time).toString() === 'Invalid Date' ? timesheet.start_time : new Date(timesheet.start_time).toLocaleString()) : ''}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                                <div className="mt-4 p-3 bg-blue-50 rounded-md">
+                                                    <p className="font-medium text-blue-800">
+                                                        总工时: {Math.floor(timesheets.reduce((total, t) => total + t.duration_minutes, 0) / 60)}小时{timesheets.reduce((total, t) => total + t.duration_minutes, 0) % 60}分钟
+                                                    </p>
+                                                    {selectedProject.hourly_rate > 0 && (
+                                                        <p className="text-blue-600">
+                                                            估算价值: ¥{(timesheets.reduce((total, t) => total + t.duration_minutes, 0) / 60 * selectedProject.hourly_rate).toFixed(2)}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
                             )}
                         </div>
