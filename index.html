@@ -796,7 +796,22 @@
                             req.onerror = () => rej(req.error);
                         }));
 
-                        const complexityFactors = { S: 1.0, M: 1.5, L: 2.2 };
+                        // 获取复杂度系数配置
+                        const complexitySettings = await txAll('app_settings', 'readonly', (store) => new Promise((res, rej) => {
+                            const index = store.index('key');
+                            const req = index.get('complexity_factors');
+                            req.onsuccess = () => res(req.result);
+                            req.onerror = () => rej(req.error);
+                        }));
+
+                        // 使用配置值或默认值
+                        let complexityFactors = { S: 1.0, M: 1.5, L: 2.2 };
+                        if (complexitySettings && complexitySettings.value) {
+                            const parsed = JSON.parse(complexitySettings.value);
+                            if (parsed && typeof parsed === 'object') {
+                                complexityFactors = parsed;
+                            }
+                        }
 
                         let totalHours = 0;
                         let totalPrice = 0;
@@ -1719,24 +1734,14 @@
                 const rate = parseFloat(hourlyRate) || 500;
                 const base = parseFloat(basePrice) || 5000;
 
+                // 使用配置的复杂度系数
+                const complexityFactors = appSettings.complexity_factors || { S: 1.0, M: 1.5, L: 2.2 };
+
                 const featureTotal = features.reduce((sum, feature) => {
                     const hours = parseInt(feature.hours_est) || 0;
 
-                    // 根据复杂度文本转换为系数
-                    let complexityFactor = 1.0;
-                    switch (feature.complexity) {
-                        case 'S':
-                            complexityFactor = 0.8;
-                            break;
-                        case 'M':
-                            complexityFactor = 1.0;
-                            break;
-                        case 'L':
-                            complexityFactor = 1.5;
-                            break;
-                        default:
-                            complexityFactor = 1.0;
-                    }
+                    // 使用配置的复杂度系数
+                    const complexityFactor = complexityFactors[feature.complexity] || complexityFactors.M || 1.5;
 
                     // 只计算在范围内的功能点
                     if (feature.in_scope) {
