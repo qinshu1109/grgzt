@@ -80,6 +80,16 @@
                         appSettings.createIndex('key', 'key', { unique: true });
                         appSettings.createIndex('created_at', 'created_at');
                     }
+                    if (!db.objectStoreNames.contains('keyword_dict')) {
+                        const keywordDict = db.createObjectStore('keyword_dict', { keyPath: 'id', autoIncrement: true });
+                        keywordDict.createIndex('tag', 'tag', { unique: true });
+                        keywordDict.createIndex('created_at', 'created_at');
+                    }
+                    if (!db.objectStoreNames.contains('pricing_baselines')) {
+                        const pricingBaselines = db.createObjectStore('pricing_baselines', { keyPath: 'id', autoIncrement: true });
+                        pricingBaselines.createIndex('tag', 'tag', { unique: true });
+                        pricingBaselines.createIndex('created_at', 'created_at');
+                    }
                 };
                 req.onsuccess = () => resolve(req.result);
                 req.onerror = () => reject(req.error);
@@ -913,6 +923,138 @@
                     }
                 },
 
+                // 词典管理API
+                getKeywordDict: async () => {
+                    try {
+                        const rows = await txAll('keyword_dict', 'readonly', (store) => new Promise((res, rej) => {
+                            const out = [];
+                            const cursorReq = store.openCursor(null, 'prev');
+                            cursorReq.onsuccess = (e) => {
+                                const cursor = e.target.result;
+                                if (cursor) { out.push(cursor.value); cursor.continue(); }
+                                else res(out);
+                            };
+                            cursorReq.onerror = () => rej(cursorReq.error);
+                        }));
+                        return { success: true, data: rows };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+
+                addKeywordDict: async (keywordData) => {
+                    try {
+                        const created_at = new Date().toISOString();
+                        const id = await txAll('keyword_dict', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.add({ ...keywordData, created_at });
+                            req.onsuccess = () => res(req.result);
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { id } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+
+                updateKeywordDict: async (id, keywordData) => {
+                    try {
+                        await txAll('keyword_dict', 'readwrite', (store) => new Promise((res, rej) => {
+                            const getReq = store.get(id);
+                            getReq.onsuccess = () => {
+                                const row = getReq.result;
+                                if (!row) { rej(new Error('Keyword not found')); return; }
+                                const updated = { ...row, ...keywordData };
+                                const putReq = store.put(updated);
+                                putReq.onsuccess = () => res({ changes: 1 });
+                                putReq.onerror = () => rej(putReq.error);
+                            };
+                            getReq.onerror = () => rej(getReq.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+
+                deleteKeywordDict: async (id) => {
+                    try {
+                        await txAll('keyword_dict', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.delete(id);
+                            req.onsuccess = () => res({ changes: 1 });
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+
+                // 基准数据管理API
+                getPricingBaselines: async () => {
+                    try {
+                        const rows = await txAll('pricing_baselines', 'readonly', (store) => new Promise((res, rej) => {
+                            const out = [];
+                            const cursorReq = store.openCursor(null, 'prev');
+                            cursorReq.onsuccess = (e) => {
+                                const cursor = e.target.result;
+                                if (cursor) { out.push(cursor.value); cursor.continue(); }
+                                else res(out);
+                            };
+                            cursorReq.onerror = () => rej(cursorReq.error);
+                        }));
+                        return { success: true, data: rows };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+
+                addPricingBaseline: async (baselineData) => {
+                    try {
+                        const created_at = new Date().toISOString();
+                        const id = await txAll('pricing_baselines', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.add({ ...baselineData, created_at });
+                            req.onsuccess = () => res(req.result);
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { id } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+
+                updatePricingBaseline: async (id, baselineData) => {
+                    try {
+                        await txAll('pricing_baselines', 'readwrite', (store) => new Promise((res, rej) => {
+                            const getReq = store.get(id);
+                            getReq.onsuccess = () => {
+                                const row = getReq.result;
+                                if (!row) { rej(new Error('Baseline not found')); return; }
+                                const updated = { ...row, ...baselineData };
+                                const putReq = store.put(updated);
+                                putReq.onsuccess = () => res({ changes: 1 });
+                                putReq.onerror = () => rej(putReq.error);
+                            };
+                            getReq.onerror = () => rej(getReq.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+
+                deletePricingBaseline: async (id) => {
+                    try {
+                        await txAll('pricing_baselines', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.delete(id);
+                            req.onsuccess = () => res({ changes: 1 });
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+
                 getComplexityFactors: async () => {
                     try {
                         const settings = await txAll('app_settings', 'readonly', (store) => new Promise((res, rej) => {
@@ -991,6 +1133,30 @@
             const [quoteCalculation, setQuoteCalculation] = React.useState(null);
             const [quoteTitle, setQuoteTitle] = React.useState('');
             const [quoteNotes, setQuoteNotes] = React.useState('');
+
+            // 词典维护状态
+            const [keywordDict, setKeywordDict] = React.useState([]);
+            const [pricingBaselines, setPricingBaselines] = React.useState([]);
+            const [showDictionaryPanel, setShowDictionaryPanel] = React.useState(false);
+            const [editingKeyword, setEditingKeyword] = React.useState(null);
+            const [editingBaseline, setEditingBaseline] = React.useState(null);
+            const [newKeyword, setNewKeyword] = React.useState({
+                tag: '',
+                display_name: '',
+                patterns: '',
+                default_hours: '',
+                default_complexity: 'M',
+                weight: '1.0'
+            });
+            const [newBaseline, setNewBaseline] = React.useState({
+                tag: '',
+                base_hours: '',
+                multiplier_S: '1.0',
+                multiplier_M: '1.5',
+                multiplier_L: '2.2',
+                default_rate: '500',
+                notes: ''
+            });
 
             // 配置管理状态
             const [appSettings, setAppSettings] = React.useState({
@@ -1389,6 +1555,229 @@
                 }
             };
 
+            // 词典维护相关函数
+            const loadKeywordDict = async () => {
+                try {
+                    const result = await api.getKeywordDict();
+                    if (result.success) {
+                        setKeywordDict(result.data);
+                    } else {
+                        setMessage('加载词典失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('加载词典失败: ' + error.message);
+                }
+            };
+
+            const loadPricingBaselines = async () => {
+                try {
+                    const result = await api.getPricingBaselines();
+                    if (result.success) {
+                        setPricingBaselines(result.data);
+                    } else {
+                        setMessage('加载基准数据失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('加载基准数据失败: ' + error.message);
+                }
+            };
+
+            const addKeyword = async () => {
+                if (!newKeyword.tag.trim() || !newKeyword.display_name.trim()) {
+                    setMessage('请输入标签和显示名称');
+                    return;
+                }
+
+                try {
+                    const patternsArray = newKeyword.patterns.split('\\n').filter(p => p.trim());
+                    const result = await api.addKeywordDict({
+                        ...newKeyword,
+                        patterns: JSON.stringify(patternsArray),
+                        default_hours: parseInt(newKeyword.default_hours) || 0,
+                        weight: parseFloat(newKeyword.weight) || 1.0
+                    });
+
+                    if (result.success) {
+                        setMessage('词典条目添加成功');
+                        setNewKeyword({
+                            tag: '',
+                            display_name: '',
+                            patterns: '',
+                            default_hours: '',
+                            default_complexity: 'M',
+                            weight: '1.0'
+                        });
+                        await loadKeywordDict();
+                    } else {
+                        setMessage('添加词典条目失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('添加词典条目失败: ' + error.message);
+                }
+            };
+
+            const updateKeyword = async (id, keywordData) => {
+                try {
+                    const patternsArray = keywordData.patterns.split('\\n').filter(p => p.trim());
+                    const result = await api.updateKeywordDict(id, {
+                        ...keywordData,
+                        patterns: JSON.stringify(patternsArray),
+                        default_hours: parseInt(keywordData.default_hours) || 0,
+                        weight: parseFloat(keywordData.weight) || 1.0
+                    });
+
+                    if (result.success) {
+                        setMessage('词典条目更新成功');
+                        setEditingKeyword(null);
+                        await loadKeywordDict();
+                    } else {
+                        setMessage('更新词典条目失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('更新词典条目失败: ' + error.message);
+                }
+            };
+
+            const deleteKeyword = async (id) => {
+                if (!confirm('确定要删除这个词典条目吗？')) {
+                    return;
+                }
+
+                try {
+                    const result = await api.deleteKeywordDict(id);
+                    if (result.success) {
+                        setMessage('词典条目删除成功');
+                        await loadKeywordDict();
+                    } else {
+                        setMessage('删除词典条目失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('删除词典条目失败: ' + error.message);
+                }
+            };
+
+            const addBaseline = async () => {
+                if (!newBaseline.tag.trim()) {
+                    setMessage('请输入标签');
+                    return;
+                }
+
+                try {
+                    const result = await api.addPricingBaseline({
+                        ...newBaseline,
+                        base_hours: parseInt(newBaseline.base_hours) || 0,
+                        multiplier_S: parseFloat(newBaseline.multiplier_S) || 1.0,
+                        multiplier_M: parseFloat(newBaseline.multiplier_M) || 1.5,
+                        multiplier_L: parseFloat(newBaseline.multiplier_L) || 2.2,
+                        default_rate: parseInt(newBaseline.default_rate) || 500
+                    });
+
+                    if (result.success) {
+                        setMessage('基准数据添加成功');
+                        setNewBaseline({
+                            tag: '',
+                            base_hours: '',
+                            multiplier_S: '1.0',
+                            multiplier_M: '1.5',
+                            multiplier_L: '2.2',
+                            default_rate: '500',
+                            notes: ''
+                        });
+                        await loadPricingBaselines();
+                    } else {
+                        setMessage('添加基准数据失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('添加基准数据失败: ' + error.message);
+                }
+            };
+
+            const updateBaseline = async (id, baselineData) => {
+                try {
+                    const result = await api.updatePricingBaseline(id, {
+                        ...baselineData,
+                        base_hours: parseInt(baselineData.base_hours) || 0,
+                        multiplier_S: parseFloat(baselineData.multiplier_S) || 1.0,
+                        multiplier_M: parseFloat(baselineData.multiplier_M) || 1.5,
+                        multiplier_L: parseFloat(baselineData.multiplier_L) || 2.2,
+                        default_rate: parseInt(baselineData.default_rate) || 500
+                    });
+
+                    if (result.success) {
+                        setMessage('基准数据更新成功');
+                        setEditingBaseline(null);
+                        await loadPricingBaselines();
+                    } else {
+                        setMessage('更新基准数据失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('更新基准数据失败: ' + error.message);
+                }
+            };
+
+            const deleteBaseline = async (id) => {
+                if (!confirm('确定要删除这个基准数据吗？')) {
+                    return;
+                }
+
+                try {
+                    const result = await api.deletePricingBaseline(id);
+                    if (result.success) {
+                        setMessage('基准数据删除成功');
+                        await loadPricingBaselines();
+                    } else {
+                        setMessage('删除基准数据失败: ' + result.message);
+                    }
+                } catch (error) {
+                    setMessage('删除基准数据失败: ' + error.message);
+                }
+            };
+
+            // 导入导出功能
+            const exportDictionary = async () => {
+                try {
+                    const data = {
+                        keyword_dict: keywordDict,
+                        pricing_baselines: pricingBaselines
+                    };
+                    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `dictionary_export_${new Date().toISOString().split('T')[0]}.json`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    setMessage('词典导出成功');
+                } catch (error) {
+                    setMessage('导出失败: ' + error.message);
+                }
+            };
+
+            const importDictionary = async (file) => {
+                try {
+                    const text = await file.text();
+                    const data = JSON.parse(text);
+
+                    if (data.keyword_dict) {
+                        for (const keyword of data.keyword_dict) {
+                            await api.addKeywordDict(keyword);
+                        }
+                    }
+
+                    if (data.pricing_baselines) {
+                        for (const baseline of data.pricing_baselines) {
+                            await api.addPricingBaseline(baseline);
+                        }
+                    }
+
+                    await loadKeywordDict();
+                    await loadPricingBaselines();
+                    setMessage('词典导入成功');
+                } catch (error) {
+                    setMessage('导入失败: ' + error.message);
+                }
+            };
+
             // 转换线索为项目
             const convertLeadToProject = async (lead) => {
                 try {
@@ -1767,7 +2156,21 @@
             return (
                 <div className="container mx-auto p-4">
                     <div className="max-w-4xl mx-auto">
-                        <h1 className="text-3xl font-bold text-gray-800 mb-6">GRGZT 应用</h1>
+                        <div className="flex items-center justify-between mb-6">
+                            <h1 className="text-3xl font-bold text-gray-800">GRGZT 应用</h1>
+                            <button
+                                onClick={() => {
+                                    setShowDictionaryPanel(!showDictionaryPanel);
+                                    if (!showDictionaryPanel) {
+                                        loadKeywordDict();
+                                        loadPricingBaselines();
+                                    }
+                                }}
+                                className="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition-colors"
+                            >
+                                {showDictionaryPanel ? '关闭词典维护' : '词典维护'}
+                            </button>
+                        </div>
 
                         {/* 状态消息 */}
                         {message && (
@@ -2684,6 +3087,408 @@
                                 </div>
                             )}
                         </div>
+
+                        {/* 词典维护面板 */}
+                        {showDictionaryPanel && (
+                            <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+                                <div className="flex items-center justify-between mb-6">
+                                    <h2 className="text-xl font-semibold">词典与基准数据维护</h2>
+                                    <div className="flex space-x-2">
+                                        <button
+                                            onClick={exportDictionary}
+                                            className="px-3 py-1 bg-green-600 text-white rounded text-sm hover:bg-green-700"
+                                        >
+                                            导出词典
+                                        </button>
+                                        <label className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 cursor-pointer">
+                                            导入词典
+                                            <input
+                                                type="file"
+                                                accept=".json"
+                                                onChange={(e) => {
+                                                    const file = e.target.files[0];
+                                                    if (file) {
+                                                        importDictionary(file);
+                                                    }
+                                                    e.target.value = '';
+                                                }}
+                                                className="hidden"
+                                            />
+                                        </label>
+                                        <button
+                                            onClick={() => {
+                                                setMessage('重识别功能需要与任务#24的规则引擎配合使用');
+                                            }}
+                                            className="px-3 py-1 bg-orange-600 text-white rounded text-sm hover:bg-orange-700"
+                                        >
+                                            一键重识别
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                    {/* 技术词典维护 */}
+                                    <div>
+                                        <h3 className="text-lg font-medium mb-4">技术词典</h3>
+
+                                        {/* 添加新词典条目 */}
+                                        <div className="bg-gray-50 p-4 rounded-lg mb-4">
+                                            <h4 className="font-medium mb-3">添加新条目</h4>
+                                            <div className="space-y-3">
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <input
+                                                        type="text"
+                                                        value={newKeyword.tag}
+                                                        onChange={(e) => setNewKeyword({...newKeyword, tag: e.target.value})}
+                                                        className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+                                                        placeholder="标签 (如: auth_basic)"
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        value={newKeyword.display_name}
+                                                        onChange={(e) => setNewKeyword({...newKeyword, display_name: e.target.value})}
+                                                        className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+                                                        placeholder="显示名称 (如: 认证基础)"
+                                                    />
+                                                </div>
+                                                <textarea
+                                                    value={newKeyword.patterns}
+                                                    onChange={(e) => setNewKeyword({...newKeyword, patterns: e.target.value})}
+                                                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                                                    placeholder="匹配模式 (每行一个)"
+                                                    rows={3}
+                                                />
+                                                <div className="grid grid-cols-3 gap-3">
+                                                    <input
+                                                        type="number"
+                                                        value={newKeyword.default_hours}
+                                                        onChange={(e) => setNewKeyword({...newKeyword, default_hours: e.target.value})}
+                                                        className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+                                                        placeholder="默认工时"
+                                                    />
+                                                    <select
+                                                        value={newKeyword.default_complexity}
+                                                        onChange={(e) => setNewKeyword({...newKeyword, default_complexity: e.target.value})}
+                                                        className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+                                                    >
+                                                        <option value="S">简单</option>
+                                                        <option value="M">中等</option>
+                                                        <option value="L">复杂</option>
+                                                    </select>
+                                                    <input
+                                                        type="number"
+                                                        step="0.1"
+                                                        value={newKeyword.weight}
+                                                        onChange={(e) => setNewKeyword({...newKeyword, weight: e.target.value})}
+                                                        className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+                                                        placeholder="权重"
+                                                    />
+                                                </div>
+                                                <button
+                                                    onClick={addKeyword}
+                                                    className="w-full py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700"
+                                                >
+                                                    添加词典条目
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* 词典条目列表 */}
+                                        <div className="overflow-x-auto">
+                                            <table className="w-full text-sm">
+                                                <thead>
+                                                    <tr className="border-b">
+                                                        <th className="text-left py-2">标签</th>
+                                                        <th className="text-left py-2">名称</th>
+                                                        <th className="text-left py-2">工时</th>
+                                                        <th className="text-left py-2">复杂度</th>
+                                                        <th className="text-left py-2">操作</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {keywordDict.map((keyword) => (
+                                                        <tr key={keyword.id} className="border-b hover:bg-gray-50">
+                                                            <td className="py-2">
+                                                                {editingKeyword?.id === keyword.id ? (
+                                                                    <input
+                                                                        type="text"
+                                                                        value={editingKeyword.tag}
+                                                                        onChange={(e) => setEditingKeyword({...editingKeyword, tag: e.target.value})}
+                                                                        className="px-2 py-1 border rounded text-xs w-full"
+                                                                    />
+                                                                ) : (
+                                                                    <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">{keyword.tag}</code>
+                                                                )}
+                                                            </td>
+                                                            <td className="py-2">
+                                                                {editingKeyword?.id === keyword.id ? (
+                                                                    <input
+                                                                        type="text"
+                                                                        value={editingKeyword.display_name}
+                                                                        onChange={(e) => setEditingKeyword({...editingKeyword, display_name: e.target.value})}
+                                                                        className="px-2 py-1 border rounded text-xs w-full"
+                                                                    />
+                                                                ) : (
+                                                                    keyword.display_name
+                                                                )}
+                                                            </td>
+                                                            <td className="py-2">
+                                                                {editingKeyword?.id === keyword.id ? (
+                                                                    <input
+                                                                        type="number"
+                                                                        value={editingKeyword.default_hours}
+                                                                        onChange={(e) => setEditingKeyword({...editingKeyword, default_hours: e.target.value})}
+                                                                        className="px-2 py-1 border rounded text-xs w-full"
+                                                                    />
+                                                                ) : (
+                                                                    keyword.default_hours + 'h'
+                                                                )}
+                                                            </td>
+                                                            <td className="py-2">
+                                                                {editingKeyword?.id === keyword.id ? (
+                                                                    <select
+                                                                        value={editingKeyword.default_complexity}
+                                                                        onChange={(e) => setEditingKeyword({...editingKeyword, default_complexity: e.target.value})}
+                                                                        className="px-2 py-1 border rounded text-xs"
+                                                                    >
+                                                                        <option value="S">S</option>
+                                                                        <option value="M">M</option>
+                                                                        <option value="L">L</option>
+                                                                    </select>
+                                                                ) : (
+                                                                    <span className={`px-1 py-0.5 rounded text-xs ${
+                                                                        keyword.default_complexity === 'S' ? 'bg-green-100 text-green-800' :
+                                                                        keyword.default_complexity === 'M' ? 'bg-yellow-100 text-yellow-800' :
+                                                                        'bg-red-100 text-red-800'
+                                                                    }`}>
+                                                                        {keyword.default_complexity}
+                                                                    </span>
+                                                                )}
+                                                            </td>
+                                                            <td className="py-2">
+                                                                {editingKeyword?.id === keyword.id ? (
+                                                                    <div className="flex space-x-1">
+                                                                        <button
+                                                                            onClick={() => updateKeyword(keyword.id, editingKeyword)}
+                                                                            className="px-2 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700"
+                                                                        >
+                                                                            保存
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={() => setEditingKeyword(null)}
+                                                                            className="px-2 py-1 bg-gray-600 text-white rounded text-xs hover:bg-gray-700"
+                                                                        >
+                                                                            取消
+                                                                        </button>
+                                                                    </div>
+                                                                ) : (
+                                                                    <div className="flex space-x-1">
+                                                                        <button
+                                                                            onClick={() => setEditingKeyword(keyword)}
+                                                                            className="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"
+                                                                        >
+                                                                            编辑
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={() => deleteKeyword(keyword.id)}
+                                                                            className="px-2 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700"
+                                                                        >
+                                                                            删除
+                                                                        </button>
+                                                                    </div>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+
+                                    {/* 基准数据维护 */}
+                                    <div>
+                                        <h3 className="text-lg font-medium mb-4">基准数据</h3>
+
+                                        {/* 添加新基准数据 */}
+                                        <div className="bg-gray-50 p-4 rounded-lg mb-4">
+                                            <h4 className="font-medium mb-3">添加新基准</h4>
+                                            <div className="space-y-3">
+                                                <input
+                                                    type="text"
+                                                    value={newBaseline.tag}
+                                                    onChange={(e) => setNewBaseline({...newBaseline, tag: e.target.value})}
+                                                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                                                    placeholder="标签 (如: default)"
+                                                />
+                                                <div className="grid grid-cols-4 gap-3">
+                                                    <input
+                                                        type="number"
+                                                        value={newBaseline.base_hours}
+                                                        onChange={(e) => setNewBaseline({...newBaseline, base_hours: e.target.value})}
+                                                        className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+                                                        placeholder="基础工时"
+                                                    />
+                                                    <input
+                                                        type="number"
+                                                        step="0.1"
+                                                        value={newBaseline.multiplier_S}
+                                                        onChange={(e) => setNewBaseline({...newBaseline, multiplier_S: e.target.value})}
+                                                        className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+                                                        placeholder="S系数"
+                                                    />
+                                                    <input
+                                                        type="number"
+                                                        step="0.1"
+                                                        value={newBaseline.multiplier_M}
+                                                        onChange={(e) => setNewBaseline({...newBaseline, multiplier_M: e.target.value})}
+                                                        className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+                                                        placeholder="M系数"
+                                                    />
+                                                    <input
+                                                        type="number"
+                                                        step="0.1"
+                                                        value={newBaseline.multiplier_L}
+                                                        onChange={(e) => setNewBaseline({...newBaseline, multiplier_L: e.target.value})}
+                                                        className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+                                                        placeholder="L系数"
+                                                    />
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <input
+                                                        type="number"
+                                                        value={newBaseline.default_rate}
+                                                        onChange={(e) => setNewBaseline({...newBaseline, default_rate: e.target.value})}
+                                                        className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+                                                        placeholder="默认费率"
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        value={newBaseline.notes}
+                                                        onChange={(e) => setNewBaseline({...newBaseline, notes: e.target.value})}
+                                                        className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+                                                        placeholder="备注"
+                                                    />
+                                                </div>
+                                                <button
+                                                    onClick={addBaseline}
+                                                    className="w-full py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700"
+                                                >
+                                                    添加基准数据
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* 基准数据列表 */}
+                                        <div className="overflow-x-auto">
+                                            <table className="w-full text-sm">
+                                                <thead>
+                                                    <tr className="border-b">
+                                                        <th className="text-left py-2">标签</th>
+                                                        <th className="text-left py-2">基础工时</th>
+                                                        <th className="text-left py-2">系数 S/M/L</th>
+                                                        <th className="text-left py-2">操作</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {pricingBaselines.map((baseline) => (
+                                                        <tr key={baseline.id} className="border-b hover:bg-gray-50">
+                                                            <td className="py-2">
+                                                                {editingBaseline?.id === baseline.id ? (
+                                                                    <input
+                                                                        type="text"
+                                                                        value={editingBaseline.tag}
+                                                                        onChange={(e) => setEditingBaseline({...editingBaseline, tag: e.target.value})}
+                                                                        className="px-2 py-1 border rounded text-xs w-full"
+                                                                    />
+                                                                ) : (
+                                                                    <code className="bg-gray-100 px-1 py-0.5 rounded text-xs">{baseline.tag}</code>
+                                                                )}
+                                                            </td>
+                                                            <td className="py-2">
+                                                                {editingBaseline?.id === baseline.id ? (
+                                                                    <input
+                                                                        type="number"
+                                                                        value={editingBaseline.base_hours}
+                                                                        onChange={(e) => setEditingBaseline({...editingBaseline, base_hours: e.target.value})}
+                                                                        className="px-2 py-1 border rounded text-xs w-full"
+                                                                    />
+                                                                ) : (
+                                                                    baseline.base_hours + 'h'
+                                                                )}
+                                                            </td>
+                                                            <td className="py-2">
+                                                                {editingBaseline?.id === baseline.id ? (
+                                                                    <div className="grid grid-cols-3 gap-1">
+                                                                        <input
+                                                                            type="number"
+                                                                            step="0.1"
+                                                                            value={editingBaseline.multiplier_S}
+                                                                            onChange={(e) => setEditingBaseline({...editingBaseline, multiplier_S: e.target.value})}
+                                                                            className="px-1 py-0.5 border rounded text-xs"
+                                                                        />
+                                                                        <input
+                                                                            type="number"
+                                                                            step="0.1"
+                                                                            value={editingBaseline.multiplier_M}
+                                                                            onChange={(e) => setEditingBaseline({...editingBaseline, multiplier_M: e.target.value})}
+                                                                            className="px-1 py-0.5 border rounded text-xs"
+                                                                        />
+                                                                        <input
+                                                                            type="number"
+                                                                            step="0.1"
+                                                                            value={editingBaseline.multiplier_L}
+                                                                            onChange={(e) => setEditingBaseline({...editingBaseline, multiplier_L: e.target.value})}
+                                                                            className="px-1 py-0.5 border rounded text-xs"
+                                                                        />
+                                                                    </div>
+                                                                ) : (
+                                                                    <span className="text-xs">
+                                                                        {baseline.multiplier_S}/{baseline.multiplier_M}/{baseline.multiplier_L}
+                                                                    </span>
+                                                                )}
+                                                            </td>
+                                                            <td className="py-2">
+                                                                {editingBaseline?.id === baseline.id ? (
+                                                                    <div className="flex space-x-1">
+                                                                        <button
+                                                                            onClick={() => updateBaseline(baseline.id, editingBaseline)}
+                                                                            className="px-2 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700"
+                                                                        >
+                                                                            保存
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={() => setEditingBaseline(null)}
+                                                                            className="px-2 py-1 bg-gray-600 text-white rounded text-xs hover:bg-gray-700"
+                                                                        >
+                                                                            取消
+                                                                        </button>
+                                                                    </div>
+                                                                ) : (
+                                                                    <div className="flex space-x-1">
+                                                                        <button
+                                                                            onClick={() => setEditingBaseline(baseline)}
+                                                                            className="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"
+                                                                        >
+                                                                            编辑
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={() => deleteBaseline(baseline.id)}
+                                                                            className="px-2 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700"
+                                                                        >
+                                                                            删除
+                                                                        </button>
+                                                                    </div>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             );
