@@ -3,7 +3,9 @@ issue: 20
 stream: main
 agent: general-purpose
 started: 2025-09-15T03:30:00Z
-status: in_progress
+last_sync: 2025-09-15T03:45:00Z
+completion: 100
+status: completed
 
 ---
 
