@@ -207,6 +207,22 @@ ipcMain.handle('create-tables', async () => {
       });
     });
 
+    // 创建应用配置表
+    await new Promise((resolve, reject) => {
+      db.run(`
+        CREATE TABLE IF NOT EXISTS app_settings (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          key TEXT UNIQUE NOT NULL,
+          value TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+      `, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
     // 创建报价明细表
     await new Promise((resolve, reject) => {
       db.run(`
@@ -1214,6 +1230,100 @@ ipcMain.handle('delete-quote', async (event, quoteId) => {
     return { success: true, data: result };
   } catch (error) {
     return { success: false, message: error.message };
+  } finally {
+    db.close();
+  }
+});
+
+// IPC处理：获取应用配置
+ipcMain.handle('get-app-settings', async () => {
+  const sqlite3 = require('sqlite3').verbose();
+  const dbPath = path.join(app.getPath('userData'), 'app.db');
+  const db = new sqlite3.Database(dbPath);
+
+  try {
+    const settings = await new Promise((resolve, reject) => {
+      db.all('SELECT key, value FROM app_settings', (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      });
+    });
+
+    const settingsObj = {};
+    settings.forEach(setting => {
+      settingsObj[setting.key] = JSON.parse(setting.value);
+    });
+
+    return { success: true, data: settingsObj };
+  } catch (error) {
+    return { success: false, message: error.message };
+  } finally {
+    db.close();
+  }
+});
+
+// IPC处理：更新应用配置
+ipcMain.handle('update-app-settings', async (event, settingsData) => {
+  const sqlite3 = require('sqlite3').verbose();
+  const dbPath = path.join(app.getPath('userData'), 'app.db');
+  const db = new sqlite3.Database(dbPath);
+
+  try {
+    // 先删除所有配置
+    await new Promise((resolve, reject) => {
+      db.run('DELETE FROM app_settings', (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+    // 插入新配置
+    for (const [key, value] of Object.entries(settingsData)) {
+      await new Promise((resolve, reject) => {
+        db.run(
+          'INSERT INTO app_settings (key, value) VALUES (?, ?)',
+          [key, JSON.stringify(value)],
+          (err) => {
+            if (err) reject(err);
+            else resolve();
+          }
+        );
+      });
+    }
+
+    return { success: true, message: 'Settings updated successfully' };
+  } catch (error) {
+    return { success: false, message: error.message };
+  } finally {
+    db.close();
+  }
+});
+
+// IPC处理：获取复杂度系数配置
+ipcMain.handle('get-complexity-factors', async () => {
+  const sqlite3 = require('sqlite3').verbose();
+  const dbPath = path.join(app.getPath('userData'), 'app.db');
+  const db = new sqlite3.Database(dbPath);
+
+  try {
+    const result = await new Promise((resolve, reject) => {
+      db.get('SELECT value FROM app_settings WHERE key = ?', ['complexity_factors'], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
+    });
+
+    let factors = { 'S': 1.0, 'M': 1.5, 'L': 2.2 }; // 默认值
+    if (result && result.value) {
+      const parsed = JSON.parse(result.value);
+      if (parsed && typeof parsed === 'object') {
+        factors = parsed;
+      }
+    }
+
+    return { success: true, data: factors };
+  } catch (error) {
+    return { success: true, data: { 'S': 1.0, 'M': 1.5, 'L': 2.2 } }; // 出错时返回默认值
   } finally {
     db.close();
   }
