@@ -6,6 +6,7 @@
   "scripts": {
     "start": "electron . --no-sandbox",
     "dev": "electron . --inspect=9229 --no-sandbox",
+    "web": "node server.js",
     "build": "echo 'No build required for simple setup'",
     "test": "echo 'No tests specified'",
     "postinstall": "electron-rebuild -f -w sqlite3"

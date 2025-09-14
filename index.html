@@ -13,6 +13,120 @@
     <div id="root"></div>
 
     <script type="text/babel">
+        // Web Fallback: 基于 IndexedDB 的 API（在无 Electron 环境时使用）
+        const createWebApi = () => {
+            const DB_NAME = 'grgzt';
+            const DB_VERSION = 1;
+
+            const openDb = () => new Promise((resolve, reject) => {
+                const req = indexedDB.open(DB_NAME, DB_VERSION);
+                req.onupgradeneeded = (event) => {
+                    const db = event.target.result;
+                    if (!db.objectStoreNames.contains('users')) {
+                        const users = db.createObjectStore('users', { keyPath: 'id', autoIncrement: true });
+                        users.createIndex('email', 'email', { unique: true });
+                        users.createIndex('created_at', 'created_at');
+                    }
+                    if (!db.objectStoreNames.contains('tasks')) {
+                        const tasks = db.createObjectStore('tasks', { keyPath: 'id', autoIncrement: true });
+                        tasks.createIndex('created_at', 'created_at');
+                        tasks.createIndex('status', 'status');
+                    }
+                };
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+
+            const txAll = async (storeName, mode, fn) => {
+                const db = await openDb();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(storeName, mode);
+                    const store = tx.objectStore(storeName);
+                    const result = fn(store);
+                    tx.oncomplete = () => resolve(result && result.value ? result.value : result);
+                    tx.onerror = () => reject(tx.error);
+                });
+            };
+
+            return {
+                createTables: async () => ({ success: true, message: 'ok' }),
+                getUsers: async () => {
+                    const rows = await txAll('users', 'readonly', (store) => new Promise((res, rej) => {
+                        const out = [];
+                        const cursorReq = store.openCursor(null, 'prev');
+                        cursorReq.onsuccess = (e) => {
+                            const cursor = e.target.result;
+                            if (cursor) { out.push(cursor.value); cursor.continue(); }
+                            else res(out);
+                        };
+                        cursorReq.onerror = () => rej(cursorReq.error);
+                    }));
+                    return { success: true, data: rows.sort((a,b) => (b.created_at||'').localeCompare(a.created_at||'')) };
+                },
+                addUser: async ({ name, email }) => {
+                    try {
+                        const created_at = new Date().toISOString();
+                        const id = await txAll('users', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.add({ name, email, created_at });
+                            req.onsuccess = () => res(req.result);
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { id } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                getTasks: async () => {
+                    const rows = await txAll('tasks', 'readonly', (store) => new Promise((res, rej) => {
+                        const out = [];
+                        const cursorReq = store.openCursor(null, 'prev');
+                        cursorReq.onsuccess = (e) => {
+                            const cursor = e.target.result;
+                            if (cursor) { out.push(cursor.value); cursor.continue(); }
+                            else res(out);
+                        };
+                        cursorReq.onerror = () => rej(cursorReq.error);
+                    }));
+                    return { success: true, data: rows.sort((a,b) => (b.created_at||'').localeCompare(a.created_at||'')) };
+                },
+                addTask: async ({ title, description = '', status = 'pending' }) => {
+                    try {
+                        const created_at = new Date().toISOString();
+                        const id = await txAll('tasks', 'readwrite', (store) => new Promise((res, rej) => {
+                            const req = store.add({ title, description, status, created_at });
+                            req.onsuccess = () => res(req.result);
+                            req.onerror = () => rej(req.error);
+                        }));
+                        return { success: true, data: { id } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                },
+                updateTaskStatus: async (taskId, status) => {
+                    try {
+                        await txAll('tasks', 'readwrite', (store) => new Promise((res, rej) => {
+                            const getReq = store.get(taskId);
+                            getReq.onsuccess = () => {
+                                const row = getReq.result;
+                                if (!row) { rej(new Error('Task not found')); return; }
+                                row.status = status;
+                                const putReq = store.put(row);
+                                putReq.onsuccess = () => res({ changes: 1 });
+                                putReq.onerror = () => rej(putReq.error);
+                            };
+                            getReq.onerror = () => rej(getReq.error);
+                        }));
+                        return { success: true, data: { changes: 1 } };
+                    } catch (e) {
+                        return { success: false, message: e.message };
+                    }
+                }
+            };
+        };
+
+        const isElectron = !!window.electronAPI;
+        const api = isElectron ? window.electronAPI : createWebApi();
+
         // 主应用组件
         const App = () => {
             const [users, setUsers] = React.useState([]);
@@ -20,15 +134,19 @@
             const [email, setEmail] = React.useState('');
             const [message, setMessage] = React.useState('');
             const [dbInitialized, setDbInitialized] = React.useState(false);
+            // 任务状态
+            const [tasks, setTasks] = React.useState([]);
+            const [taskTitle, setTaskTitle] = React.useState('');
+            const [taskDesc, setTaskDesc] = React.useState('');
 
             // 初始化数据库
             const initDatabase = async () => {
                 try {
-                    const result = await window.electronAPI.createTables();
+                    const result = await api.createTables();
                     if (result.success) {
                         setMessage('数据库初始化成功');
                         setDbInitialized(true);
-                        await loadUsers();
+                        await Promise.all([loadUsers(), loadTasks()]);
                     } else {
                         setMessage('数据库初始化失败: ' + result.message);
                     }
@@ -40,7 +158,7 @@
             // 加载用户列表
             const loadUsers = async () => {
                 try {
-                    const result = await window.electronAPI.getUsers();
+                    const result = await api.getUsers();
                     if (result.success) {
                         setUsers(result.data);
                     } else {
@@ -59,7 +177,7 @@
                 }
 
                 try {
-                    const result = await window.electronAPI.addUser({ name, email });
+                    const result = await api.addUser({ name, email });
                     if (result.success) {
                         setMessage('用户添加成功');
                         setName('');
@@ -70,6 +188,49 @@
                     }
                 } catch (error) {
                     setMessage('添加用户失败: ' + error.message);
+                }
+            };
+
+            // 加载任务
+            const loadTasks = async () => {
+                try {
+                    const result = await api.getTasks();
+                    if (result.success) setTasks(result.data);
+                    else setMessage('加载任务失败: ' + result.message);
+                } catch (e) {
+                    setMessage('加载任务失败: ' + e.message);
+                }
+            };
+
+            // 添加任务
+            const addTask = async () => {
+                if (!taskTitle.trim()) { setMessage('请输入任务标题'); return; }
+                try {
+                    const result = await api.addTask({ title: taskTitle, description: taskDesc, status: 'pending' });
+                    if (result.success) {
+                        setMessage('任务添加成功');
+                        setTaskTitle('');
+                        setTaskDesc('');
+                        await loadTasks();
+                    } else {
+                        setMessage('添加任务失败: ' + result.message);
+                    }
+                } catch (e) {
+                    setMessage('添加任务失败: ' + e.message);
+                }
+            };
+
+            // 更新任务状态
+            const updateTask = async (taskId, status) => {
+                try {
+                    const result = await api.updateTaskStatus(taskId, status);
+                    if (result.success) {
+                        await loadTasks();
+                    } else {
+                        setMessage('更新任务失败: ' + result.message);
+                    }
+                } catch (e) {
+                    setMessage('更新任务失败: ' + e.message);
                 }
             };
 
@@ -148,8 +309,62 @@
                                                 <span className="text-gray-500 ml-2">{user.email}</span>
                                             </div>
                                             <span className="text-sm text-gray-400">
-                                                {user.created_at || new Date().toLocaleString()}
+                                                {user.created_at ? (new Date(user.created_at).toString() === 'Invalid Date' ? user.created_at : new Date(user.created_at).toLocaleString()) : ''}
                                             </span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* 任务面板 */}
+                        <div className="bg-white rounded-lg shadow-md p-6 mt-6">
+                            <h2 className="text-xl font-semibold mb-4">任务管理</h2>
+                            <div className="space-y-4 mb-4">
+                                <input
+                                    type="text"
+                                    value={taskTitle}
+                                    onChange={(e) => setTaskTitle(e.target.value)}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    placeholder="任务标题"
+                                />
+                                <textarea
+                                    value={taskDesc}
+                                    onChange={(e) => setTaskDesc(e.target.value)}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    placeholder="任务描述"
+                                />
+                                <button
+                                    onClick={addTask}
+                                    disabled={!dbInitialized}
+                                    className={`w-full py-2 px-4 rounded-md text-white font-medium ${dbInitialized ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'}`}
+                                >
+                                    添加任务
+                                </button>
+                            </div>
+
+                            {tasks.length === 0 ? (
+                                <p className="text-gray-500">暂无任务</p>
+                            ) : (
+                                <div className="space-y-2">
+                                    {tasks.map((task) => (
+                                        <div key={task.id} className="p-3 bg-gray-50 rounded-md">
+                                            <div className="flex items-center justify-between">
+                                                <div>
+                                                    <span className="font-medium">{task.title}</span>
+                                                    {task.description && (
+                                                        <span className="text-gray-500 ml-2">{task.description}</span>
+                                                    )}
+                                                </div>
+                                                <div className="flex items-center space-x-2">
+                                                    <span className="text-sm text-gray-500">状态: {task.status}</span>
+                                                    <button className="px-2 py-1 text-sm bg-green-600 text-white rounded" onClick={() => updateTask(task.id, 'done')}>设为完成</button>
+                                                    <button className="px-2 py-1 text-sm bg-yellow-600 text-white rounded" onClick={() => updateTask(task.id, 'pending')}>设为待办</button>
+                                                </div>
+                                            </div>
+                                            <div className="text-xs text-gray-400 mt-1">
+                                                {task.created_at ? (new Date(task.created_at).toString() === 'Invalid Date' ? task.created_at : new Date(task.created_at).toLocaleString()) : ''}
+                                            </div>
                                         </div>
                                     ))}
                                 </div>
@@ -160,9 +375,11 @@
             );
         };
 
-        // 检查 electronAPI 是否可用
-        if (!window.electronAPI) {
-            console.error('Electron API not available');
+        // 提示当前运行模式
+        if (!isElectron) {
+            console.log('Running in Web mode with IndexedDB backend');
+        } else {
+            console.log('Running in Electron mode');
         }
 
         // 渲染应用
