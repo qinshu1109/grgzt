@@ -1329,6 +1329,32 @@ ipcMain.handle('get-complexity-factors', async () => {
   }
 });
 
+// IPC处理：更新复杂度系数配置
+ipcMain.handle('update-complexity-factors', async (event, factorsData) => {
+  const sqlite3 = require('sqlite3').verbose();
+  const dbPath = path.join(app.getPath('userData'), 'app.db');
+  const db = new sqlite3.Database(dbPath);
+
+  try {
+    const result = await new Promise((resolve, reject) => {
+      db.run(
+        'INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)',
+        ['complexity_factors', JSON.stringify(factorsData)],
+        function(err) {
+          if (err) reject(err);
+          else resolve({ changes: this.changes });
+        }
+      );
+    });
+
+    return { success: true, data: result };
+  } catch (error) {
+    return { success: false, message: error.message };
+  } finally {
+    db.close();
+  }
+});
+
 // IPC处理：计算报价
 ipcMain.handle('calculate-quote', async (event, leadId, basePrice = 0, hourlyRate = 500) => {
   const sqlite3 = require('sqlite3').verbose();

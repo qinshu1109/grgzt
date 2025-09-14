@@ -56,5 +56,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 应用配置操作
   getAppSettings: () => ipcRenderer.invoke('get-app-settings'),
   updateAppSettings: (settingsData) => ipcRenderer.invoke('update-app-settings', settingsData),
-  getComplexityFactors: () => ipcRenderer.invoke('get-complexity-factors')
+  getComplexityFactors: () => ipcRenderer.invoke('get-complexity-factors'),
+  updateComplexityFactors: (factorsData) => ipcRenderer.invoke('update-complexity-factors', factorsData)
 });
