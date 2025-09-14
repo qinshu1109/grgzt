@@ -1348,8 +1348,22 @@ ipcMain.handle('calculate-quote', async (event, leadId, basePrice = 0, hourlyRat
       );
     });
 
-    // 计算复杂度系数
-    const complexityFactors = { 'S': 1.0, 'M': 1.5, 'L': 2.2 };
+    // 获取复杂度系数配置
+    const complexityResult = await new Promise((resolve, reject) => {
+      db.get('SELECT value FROM app_settings WHERE key = ?', ['complexity_factors'], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
+    });
+
+    // 计算复杂度系数，使用配置值或默认值
+    let complexityFactors = { 'S': 1.0, 'M': 1.5, 'L': 2.2 };
+    if (complexityResult && complexityResult.value) {
+      const parsed = JSON.parse(complexityResult.value);
+      if (parsed && typeof parsed === 'object') {
+        complexityFactors = parsed;
+      }
+    }
 
     let totalHours = 0;
     let totalPrice = 0;
