@@ -4,8 +4,8 @@
   "description": "GRGZT Electron Application",
   "main": "main.js",
   "scripts": {
-    "start": "electron .",
-    "dev": "electron . --inspect=9229",
+    "start": "electron . --no-sandbox",
+    "dev": "electron . --inspect=9229 --no-sandbox",
     "build": "echo 'No build required for simple setup'",
     "test": "echo 'No tests specified'",
     "postinstall": "electron-rebuild -f -w sqlite3"
