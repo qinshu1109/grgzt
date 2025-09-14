@@ -51,5 +51,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   createQuoteItem: (itemData) => ipcRenderer.invoke('create-quote-item', itemData),
   updateQuote: (quoteId, quoteData) => ipcRenderer.invoke('update-quote', quoteId, quoteData),
   deleteQuote: (quoteId) => ipcRenderer.invoke('delete-quote', quoteId),
-  calculateQuote: (leadId, basePrice = 0, hourlyRate = 500) => ipcRenderer.invoke('calculate-quote', leadId, basePrice, hourlyRate)
+  calculateQuote: (leadId, basePrice = 0, hourlyRate = 500) => ipcRenderer.invoke('calculate-quote', leadId, basePrice, hourlyRate),
+
+  // 应用配置操作
+  getAppSettings: () => ipcRenderer.invoke('get-app-settings'),
+  updateAppSettings: (settingsData) => ipcRenderer.invoke('update-app-settings', settingsData),
+  getComplexityFactors: () => ipcRenderer.invoke('get-complexity-factors')
 });
