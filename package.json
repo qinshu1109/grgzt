@@ -1,0 +1,25 @@
+{
+  "name": "grgzt-app",
+  "version": "1.0.0",
+  "description": "GRGZT Electron Application",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --inspect=9229",
+    "build": "echo 'No build required for simple setup'",
+    "test": "echo 'No tests specified'",
+    "postinstall": "electron-rebuild -f -w sqlite3"
+  },
+  "keywords": ["electron", "react", "sqlite"],
+  "author": "GRGZT Team",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-rebuild": "^3.2.9"
+  },
+  "dependencies": {
+    "sqlite3": "^5.1.6",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}
